@@ -155,6 +155,14 @@ type GenesisInput struct {
 	Allocations []GenesisAllocation `json:"allocations,omitempty"`
 	// PoX specifies regtest cycle lengths.
 	PoX *PoX `json:"pox,omitempty"`
+	// Restore starts the network from a captured chainstate instead of initializing it from genesis.
+	Restore *GenesisRestore `json:"restore,omitempty"`
+}
+
+// GenesisRestore selects a captured chainstate for a new network.
+type GenesisRestore struct {
+	// SnapshotRef selects a StacksChainstateSnapshot in the network namespace.
+	SnapshotRef common.NameRef `json:"snapshotRef"`
 }
 
 // PoX defines reward and preparation cycle lengths.

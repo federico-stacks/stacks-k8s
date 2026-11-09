@@ -451,6 +451,27 @@ spec:
                     x-kubernetes-validations:
                     - message: prepare must be shorter than reward cycle
                       rule: self.prepareLength < self.rewardCycleLength
+                  restore:
+                    description: Restore starts the network from a captured chainstate
+                      instead of initializing it from genesis.
+                    properties:
+                      snapshotRef:
+                        description: SnapshotRef selects a StacksChainstateSnapshot
+                          in the network namespace.
+                        properties:
+                          name:
+                            description: Name is the referenced name; the containing
+                              field determines its kind.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - snapshotRef
+                    type: object
                 type: object
               operation:
                 default: Running

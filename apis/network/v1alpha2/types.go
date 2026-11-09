@@ -25,6 +25,8 @@ func AddToScheme(s *runtime.Scheme) error {
 		&StacksGenesisList{},
 		&StacksEpochSchedule{},
 		&StacksEpochScheduleList{},
+		&StacksChainstateSnapshot{},
+		&StacksChainstateSnapshotList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
