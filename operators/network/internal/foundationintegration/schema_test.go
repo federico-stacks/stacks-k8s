@@ -342,6 +342,7 @@ func TestFoundationSchemasAndFreeze(t *testing.T) {
 	verifyTrafficRecipientReplacement(t, ctx, c, root, request, &network)
 	verifyBootstrapGatePolicyRelease(t, ctx, c, root, request, &network, &genesis, cfg, scheme)
 	verifyRetainedSourceEligibility(t, ctx, c, root, request, &network)
+	verifyChainstateRestore(t, ctx, c, root, account, wallet)
 	// Removing a participant is destructive; its name cannot be used again.
 	removed := network.Spec.Participants[len(network.Spec.Participants)-1]
 	network.Spec.Participants = network.Spec.Participants[:len(network.Spec.Participants)-1]

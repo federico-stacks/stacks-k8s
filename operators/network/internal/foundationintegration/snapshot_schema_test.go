@@ -89,21 +89,29 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 	}
 	for name, mutate := range map[string]func(*api.StacksChainstateSnapshotSpec){
 		"actor-without-archive": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[0].Archive = nil },
-		"worker-with-archive":   func(s *api.StacksChainstateSnapshotSpec) { s.Participants[3].Archive = archive("stacker-01") },
-		"signer-mining":         func(s *api.StacksChainstateSnapshotSpec) { s.Participants[2].MiningEnabled = ptr.To(false) },
-		"node-stake":            func(s *api.StacksChainstateSnapshotSpec) { s.Participants[1].LockCycles = ptr.To(int32(2)) },
+		"worker-with-archive": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[3].Archive = archive("stacker-01")
+		},
+		"signer-mining": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[2].MiningEnabled = ptr.To(false)
+		},
+		"node-stake": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[1].LockCycles = ptr.To(int32(2))
+		},
 		"no-archives": func(s *api.StacksChainstateSnapshotSpec) {
 			s.Participants = s.Participants[3:]
 		},
 		"archive-outside-root": func(s *api.StacksChainstateSnapshotSpec) {
 			s.Participants[0].Archive.Path = "../btc-01.tar.gz"
 		},
-		"archive-checksum":  func(s *api.StacksChainstateSnapshotSpec) { s.Participants[0].Archive.SHA256 = "abc" },
-		"genesis-digest":    func(s *api.StacksChainstateSnapshotSpec) { s.GenesisDigest = hex(64) },
-		"consensus-hash":    func(s *api.StacksChainstateSnapshotSpec) { s.Stacks.ConsensusHash = hex(64) },
-		"no-participants":   func(s *api.StacksChainstateSnapshotSpec) { s.Participants = nil },
-		"bitcoin-tip-hash":  func(s *api.StacksChainstateSnapshotSpec) { s.Bitcoin.BlockHash = "" },
-		"lock-cycles-range": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[3].LockCycles = ptr.To(int32(13)) },
+		"archive-checksum": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[0].Archive.SHA256 = "abc" },
+		"genesis-digest":   func(s *api.StacksChainstateSnapshotSpec) { s.GenesisDigest = hex(64) },
+		"consensus-hash":   func(s *api.StacksChainstateSnapshotSpec) { s.Stacks.ConsensusHash = hex(64) },
+		"no-participants":  func(s *api.StacksChainstateSnapshotSpec) { s.Participants = nil },
+		"bitcoin-tip-hash": func(s *api.StacksChainstateSnapshotSpec) { s.Bitcoin.BlockHash = "" },
+		"lock-cycles-range": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[3].LockCycles = ptr.To(int32(13))
+		},
 	} {
 		invalid := valid(name)
 		mutate(&invalid.Spec)
@@ -131,7 +139,11 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 		t.Fatalf("restore selection not preserved: %+v", network.Spec.Genesis)
 	}
 	network.Spec.Genesis.Restore = nil
-	if err := c.Update(ctx, network); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "genesis is immutable") {
+	if err := c.Update(
+		ctx,
+		network,
+	); !apierrors.IsInvalid(err) ||
+		!strings.Contains(err.Error(), "genesis is immutable") {
 		t.Fatalf("restore removal accepted: %v", err)
 	}
 }
