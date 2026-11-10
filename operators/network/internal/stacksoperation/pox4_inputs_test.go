@@ -32,6 +32,7 @@ func TestPoX4PublicInputsRequireCurrentAndCapturedIdentities(t *testing.T) {
 		"late-holder-replaced",
 		"late-removed",
 		"late-shared-key",
+		"restored",
 	} {
 		t.Run(change, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -189,6 +190,15 @@ func TestPoX4PublicInputsRequireCurrentAndCapturedIdentities(t *testing.T) {
 				root.Status.GenesisRef.Fingerprint = foundation.Digest(genesis.Spec)
 			}
 			switch change {
+			case "restored":
+				// The restored chain already holds the bootstrap enrollment: the frozen cohort renews.
+				genesis.Spec.Source.Dependencies = append(genesis.Spec.Source.Dependencies, common.Binding{
+					Kind:        api.KindStacksChainstateSnapshot,
+					Name:        "seed",
+					UID:         "seed",
+					Fingerprint: "snapshot-digest",
+				})
+				root.Status.GenesisRef.Fingerprint = foundation.Digest(genesis.Spec)
 			case "late-removed":
 				root.Status.Identities[0].Removing = true
 			case "late-shared-key":
@@ -214,7 +224,7 @@ func TestPoX4PublicInputsRequireCurrentAndCapturedIdentities(t *testing.T) {
 				context.Background(),
 				stacksworker.Snapshot{Network: root, Participant: stacker},
 			)
-			if change == "late" || change == "late-shared-key" {
+			if change == "late" || change == "late-shared-key" || change == "restored" {
 				pox5, e := (PublicInputs{Reader: c, Sender: holder.Status.Identity.Address}).PoX5(
 					context.Background(),
 					stacksworker.Snapshot{Network: root, Participant: stacker},

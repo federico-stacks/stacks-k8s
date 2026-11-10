@@ -12,6 +12,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// Restored reports whether a frozen genesis pins a chainstate snapshot: the network was restored
+// from captured chain data instead of initialized from genesis.
+func Restored(genesis *api.StacksGenesis) bool {
+	for _, b := range genesis.Spec.Source.Dependencies {
+		if b.Kind == api.KindStacksChainstateSnapshot {
+			return true
+		}
+	}
+	return false
+}
+
 // RestoredSnapshot returns the chainstate snapshot a frozen genesis pins, or nil for a network
 // initialized from genesis. The snapshot must still exist with its pinned identity and content.
 func RestoredSnapshot(
