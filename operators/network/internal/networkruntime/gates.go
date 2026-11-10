@@ -8,6 +8,7 @@ import (
 	bitcoin "github.com/cylewitruk-stacks/stacks-k8s/apis/network/bitcoin/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
+	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/objectref"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -91,6 +92,14 @@ func (r *Reconciler) projectGates(
 	}
 	state := root.Status.Initialization
 	if state.Completed {
+		return false, nil
+	}
+	snapshot, err := foundation.RestoredSnapshot(ctx, r.Reader, genesis)
+	if err != nil {
+		return false, err
+	}
+	if snapshot != nil {
+		completeByRestore(state, genesis.Spec.Bootstrap.Gates, record, snapshot)
 		return false, nil
 	}
 	gate := genesis.Spec.Bootstrap.Gates[state.GateIndex]
@@ -190,6 +199,31 @@ func (r *Reconciler) projectGates(
 		state.AuthorizedCeiling = genesis.Spec.Bootstrap.Gates[state.GateIndex].BitcoinCeiling
 	}
 	return false, nil
+}
+
+// completeByRestore records every frozen gate as completed once restored Bitcoin preparation is.
+// A restored chain is already past every ceiling, so its gates are not observed one by one: neither
+// the ceiling latch nor the observation deadline applies. The snapshot's own source network
+// observed them; the restored preparation proved the chain is that snapshot.
+func completeByRestore(
+	state *api.InitializationStatus,
+	gates []api.Gate,
+	record *bitcoin.BitcoinInitialization,
+	snapshot *api.StacksChainstateSnapshot,
+) {
+	if record.Status.PreparedAt == nil {
+		return
+	}
+	for int(state.GateIndex) < len(state.Gates) {
+		completed := *record.Status.PreparedAt
+		state.Gates[state.GateIndex].CompletedAt = &completed
+		state.GateIndex++
+	}
+	// Completed state retains the final ceiling, exactly as gate-by-gate completion leaves it.
+	state.AuthorizedCeiling = gates[len(gates)-1].BitcoinCeiling
+	state.Completed = true
+	restoredFrom := objectref.WithFingerprint(objectref.ChainstateSnapshot(snapshot), foundation.Digest(snapshot.Spec))
+	state.RestoredFrom = &restoredFrom
 }
 
 // initializationHeight uses the exact initial target's successful, fresh read observation.
