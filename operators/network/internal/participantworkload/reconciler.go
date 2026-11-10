@@ -114,6 +114,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			}
 		}
 		if reason == reasonControlUnavailable || reason == reasonConfigurationUnavailable ||
+			reason == reasonRestoreUnavailable ||
 			reason == reasonRuntimeIdentityUnavailable ||
 			reason == reasonWorkloadUnavailable ||
 			reason == api.ReasonStopping ||
@@ -337,7 +338,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			return finish(metav1.ConditionFalse, api.ReasonOwnershipConflict, err.Error())
 		}
 	}
-	workload, err := actorWorkload(&p, &state)
+	restore, err := r.chainstateRestoreFor(ctx, &currentRoot, &p)
+	if err != nil {
+		return finish(metav1.ConditionFalse, reasonRestoreUnavailable, err.Error())
+	}
+	workload, err := actorWorkload(&p, &state, restore)
 	if err != nil {
 		return finish(metav1.ConditionFalse, api.ReasonInvalidConfiguration, err.Error())
 	}
@@ -405,19 +410,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		}
 	}
 	meta.SetStatusCondition(&conditions, placement)
-	for _, status := range pod.Status.InitContainerStatuses {
-		if status.Name == "config-check" &&
-			((status.State.Terminated != nil &&
-				status.State.Terminated.ExitCode != 0) ||
-				(status.State.Waiting != nil &&
-					status.LastTerminationState.Terminated != nil &&
-					status.LastTerminationState.Terminated.ExitCode != 0)) {
-			return finish(
-				metav1.ConditionFalse,
-				api.ReasonInvalidConfiguration,
-				"Selected actor image rejected its native configuration; private validation output is suppressed",
-			)
-		}
+	if initContainerFailed(pod, restoreContainer) {
+		return finish(
+			metav1.ConditionFalse,
+			reasonRestoreFailed,
+			"Chainstate restore failed; check the snapshot image and its archive checksum",
+		)
+	}
+	if initContainerFailed(pod, "config-check") {
+		return finish(
+			metav1.ConditionFalse,
+			api.ReasonInvalidConfiguration,
+			"Selected actor image rejected its native configuration; private validation output is suppressed",
+		)
 	}
 	if podReady(pod) && pod.Annotations[api.AnnotationPolicyDigest] == state.PolicyDigest &&
 		(p.Spec.Kind == api.ParticipantBitcoinNode ||

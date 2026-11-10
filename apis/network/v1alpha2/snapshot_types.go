@@ -23,8 +23,10 @@ type StacksChainstateSnapshot struct {
 // StacksChainstateSnapshotSpec identifies an artifact and its source network's initial cohort.
 // +kubebuilder:validation:XValidation:rule="self.participants.exists(p, has(p.archive))",message="a snapshot carries at least one actor archive"
 type StacksChainstateSnapshotSpec struct {
-	// Image carries the actor archives under /snapshot. Restore verifies every archive checksum,
-	// so a tag is accepted; a digest reference additionally pins delivery.
+	// Image carries the actor archives under /snapshot and provides a POSIX shell with tar (gzip),
+	// sha256sum, cut and find, as BusyBox does. Every actor start runs it, so it must stay
+	// available while a restored network exists. Restore verifies every archive checksum, so a
+	// tag is accepted; a digest reference additionally pins delivery.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
 	Image string `json:"image"`
@@ -76,7 +78,8 @@ type SnapshotParticipant struct {
 
 // SnapshotArchive locates one actor's captured data in the snapshot image.
 type SnapshotArchive struct {
-	// Path names a gzip tar archive directly under /snapshot.
+	// Path names a gzip tar archive directly under /snapshot, with members relative to the actor's
+	// data root.
 	// +kubebuilder:validation:MaxLength=128
 	// +kubebuilder:validation:Pattern=`^[a-z0-9][-a-z0-9.]*\.tar\.gz$`
 	Path string `json:"path"`

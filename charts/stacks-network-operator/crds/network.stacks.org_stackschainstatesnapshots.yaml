@@ -68,8 +68,10 @@ spec:
                 type: string
               image:
                 description: |-
-                  Image carries the actor archives under /snapshot. Restore verifies every archive checksum,
-                  so a tag is accepted; a digest reference additionally pins delivery.
+                  Image carries the actor archives under /snapshot and provides a POSIX shell with tar (gzip),
+                  sha256sum, cut and find, as BusyBox does. Every actor start runs it, so it must stay
+                  available while a restored network exists. Restore verifies every archive checksum, so a
+                  tag is accepted; a digest reference additionally pins delivery.
                 maxLength: 512
                 minLength: 1
                 type: string
@@ -124,8 +126,9 @@ spec:
                           minLength: 1
                           type: string
                         path:
-                          description: Path names a gzip tar archive directly under
-                            /snapshot.
+                          description: |-
+                            Path names a gzip tar archive directly under /snapshot, with members relative to the actor's
+                            data root.
                           maxLength: 128
                           pattern: ^[a-z0-9][-a-z0-9.]*\.tar\.gz$
                           type: string
