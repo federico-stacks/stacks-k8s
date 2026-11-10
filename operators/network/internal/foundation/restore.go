@@ -1,6 +1,7 @@
 package foundation
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,7 +9,31 @@ import (
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// RestoredSnapshot returns the chainstate snapshot a frozen genesis pins, or nil for a network
+// initialized from genesis. The snapshot must still exist with its pinned identity and content.
+func RestoredSnapshot(
+	ctx context.Context,
+	reader client.Reader,
+	genesis *api.StacksGenesis,
+) (*api.StacksChainstateSnapshot, error) {
+	for _, b := range genesis.Spec.Source.Dependencies {
+		if b.Kind != api.KindStacksChainstateSnapshot {
+			continue
+		}
+		var snapshot api.StacksChainstateSnapshot
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: genesis.Namespace, Name: b.Name}, &snapshot); err != nil {
+			return nil, fmt.Errorf("chainstate snapshot %s unavailable", b.Name)
+		}
+		if snapshot.UID != b.UID || snapshot.DeletionTimestamp != nil || Digest(snapshot.Spec) != b.Fingerprint {
+			return nil, fmt.Errorf("chainstate snapshot %s identity changed", b.Name)
+		}
+		return &snapshot, nil
+	}
+	return nil, nil
+}
 
 // restoreMember pairs one initial cohort requirement with its compiled policy.
 type restoreMember struct {

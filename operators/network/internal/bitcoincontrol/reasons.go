@@ -93,6 +93,14 @@ const (
 	reasonReplacementVerificationFailed = "ReplacementVerificationFailed"
 	// reasonReplacementWorkInsufficient reports ReplacementWorkInsufficient.
 	reasonReplacementWorkInsufficient = "ReplacementWorkInsufficient"
+	// reasonRestorePrepared reports RestorePrepared.
+	reasonRestorePrepared = "RestorePrepared"
+	// reasonRestoreSnapshotUnavailable reports RestoreSnapshotUnavailable.
+	reasonRestoreSnapshotUnavailable = "RestoreSnapshotUnavailable"
+	// reasonRestoredChainDiffers reports RestoredChainDiffers.
+	reasonRestoredChainDiffers = "RestoredChainDiffers"
+	// reasonRestoredWalletsImmature reports RestoredWalletsImmature.
+	reasonRestoredWalletsImmature = "RestoredWalletsImmature"
 	// reasonSchedulerNotEnrolled reports SchedulerNotEnrolled.
 	reasonSchedulerNotEnrolled = "SchedulerNotEnrolled"
 	// reasonSchedulerWaiting reports SchedulerWaiting.

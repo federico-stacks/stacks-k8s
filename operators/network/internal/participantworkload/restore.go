@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
+	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,23 +48,14 @@ func (r *Reconciler) chainstateRestoreFor(
 	); err != nil {
 		return nil, fmt.Errorf("genesis unavailable")
 	}
-	for _, b := range genesis.Spec.Source.Dependencies {
-		if b.Kind != api.KindStacksChainstateSnapshot {
-			continue
+	snapshot, err := foundation.RestoredSnapshot(ctx, r.Reader, &genesis)
+	if err != nil || snapshot == nil {
+		return nil, err
+	}
+	for _, member := range snapshot.Spec.Participants {
+		if member.Name == p.Spec.ParticipantName && member.Kind == p.Spec.Kind && member.Archive != nil {
+			return &chainstateRestore{image: snapshot.Spec.Image, archive: *member.Archive}, nil
 		}
-		var snapshot api.StacksChainstateSnapshot
-		if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: root.Namespace, Name: b.Name}, &snapshot); err != nil {
-			return nil, fmt.Errorf("chainstate snapshot %s unavailable", b.Name)
-		}
-		if snapshot.UID != b.UID || snapshot.DeletionTimestamp != nil || digest(snapshot.Spec) != b.Fingerprint {
-			return nil, fmt.Errorf("chainstate snapshot %s identity changed", b.Name)
-		}
-		for _, member := range snapshot.Spec.Participants {
-			if member.Name == p.Spec.ParticipantName && member.Kind == p.Spec.Kind && member.Archive != nil {
-				return &chainstateRestore{image: snapshot.Spec.Image, archive: *member.Archive}, nil
-			}
-		}
-		return nil, nil
 	}
 	return nil, nil
 }
