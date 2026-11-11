@@ -268,3 +268,13 @@ func TestPatchOperationSetsTheOperationWithTheUIDGuard(t *testing.T) {
 		t.Fatalf("network %+v", got.ObjectMeta)
 	}
 }
+
+func TestDockerfilePlacesReadableArchivesOnTheBase(t *testing.T) {
+	got := string(dockerfile(defaultExportImage))
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "# ") ||
+		lines[1] != "FROM "+defaultExportImage ||
+		lines[2] != "COPY --chmod=0555 *.tar.gz /snapshot/" {
+		t.Fatalf("Dockerfile:\n%s", got)
+	}
+}

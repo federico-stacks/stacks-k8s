@@ -19,7 +19,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// defaultExportImage provides the tar the export Pod runs; it is pinned by digest.
+// defaultExportImage provides tar for the export Pod and the tools of the restore script as the
+// snapshot image base; it is pinned by digest.
 const defaultExportImage = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 
 // request selects the cluster, the exact source network and where the snapshot is written.

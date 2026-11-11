@@ -17,14 +17,19 @@ import (
 // stillRounds is how many consecutive refreshes of every observation must repeat the same tips.
 const stillRounds = 2
 
-// manifestFile is the ready-to-apply snapshot resource written next to the archives.
-const manifestFile = "snapshot.yaml"
+const (
+	// manifestFile is the ready-to-apply snapshot resource written next to the archives.
+	manifestFile = "snapshot.yaml"
+	// dockerfileFile builds the snapshot image from the output directory.
+	dockerfileFile = "Dockerfile"
+)
 
 // report is the capture result; it holds public chain facts and checksums only.
 type report struct {
 	NetworkUID string                 `json:"networkUID"`
 	Snapshot   string                 `json:"snapshot"`
 	Manifest   string                 `json:"manifest"`
+	Dockerfile string                 `json:"dockerfile"`
 	Bitcoin    api.SnapshotBitcoinTip `json:"bitcoin"`
 	Stacks     api.SnapshotStacksTip  `json:"stacks"`
 	Archives   []archiveReport        `json:"archives"`
@@ -150,8 +155,25 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 	if err = os.WriteFile(out.Manifest, data, 0o600); err != nil {
 		return out, fmt.Errorf("write manifest: %w", err)
 	}
-	mark("written", "wrote "+out.Manifest)
+	out.Dockerfile = filepath.Join(r.Output, dockerfileFile)
+	if err = os.WriteFile(out.Dockerfile, dockerfile(r.ExportImage), 0o600); err != nil {
+		return out, fmt.Errorf("write Dockerfile: %w", err)
+	}
+	mark("written", fmt.Sprintf(
+		"wrote %s and %s; build the snapshot image with docker build -t %s %s, then load it into kind or push it",
+		manifestFile, dockerfileFile, r.Image, r.Output,
+	))
 	return out, nil
+}
+
+// dockerfile builds the snapshot image: the archives under /snapshot on a BusyBox-compatible base
+// that provides the restore script's tools. The archives are written owner-only and COPY keeps
+// file modes, so --chmod opens them to the restore user. BuildKit applies it to the /snapshot
+// directory it creates as well, which needs the execute bit to be entered: 0555, not 0444.
+func dockerfile(base string) []byte {
+	return []byte("# Chainstate snapshot image, built by: docker build -t <image> <this directory>\n" +
+		"FROM " + base + "\n" +
+		"COPY --chmod=0555 *.tar.gz /snapshot/\n")
 }
 
 // settler decides when the chain is still: every observation refreshed stillRounds times in a row
