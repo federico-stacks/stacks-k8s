@@ -195,15 +195,16 @@ spec:
                     description: BlockHash is the captured tip block hash.
                     pattern: ^[0-9a-f]{64}$
                     type: string
-                  consensusHash:
-                    description: ConsensusHash is the captured tip's consensus hash.
-                    pattern: ^[0-9a-f]{40}$
-                    type: string
                   height:
                     description: Height is the captured Stacks block height.
                     format: int64
                     minimum: 0
                     type: integer
+                  indexBlockID:
+                    description: IndexBlockID is the captured tip's index block ID,
+                      SHA512/256(block hash || consensus hash).
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
                   rewardCycle:
                     description: RewardCycle is the PoX reward cycle at capture.
                     format: int64
@@ -211,8 +212,8 @@ spec:
                     type: integer
                 required:
                 - blockHash
-                - consensusHash
                 - height
+                - indexBlockID
                 - rewardCycle
                 type: object
             required:

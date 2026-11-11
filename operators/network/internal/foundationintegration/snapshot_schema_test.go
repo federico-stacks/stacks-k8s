@@ -62,10 +62,10 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 				},
 				Bitcoin: api.SnapshotBitcoinTip{Height: 217, BlockHash: hex(64)},
 				Stacks: api.SnapshotStacksTip{
-					Height:        126,
-					BlockHash:     hex(64),
-					ConsensusHash: hex(40),
-					RewardCycle:   10,
+					Height:       126,
+					BlockHash:    hex(64),
+					IndexBlockID: hex(64),
+					RewardCycle:  10,
 				},
 			},
 		}
@@ -79,7 +79,7 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 		t.Fatal(err)
 	}
 	if len(stored.Spec.Participants) != 5 || stored.Spec.Participants[1].Archive == nil ||
-		stored.Spec.Stacks.ConsensusHash != hex(40) {
+		stored.Spec.Stacks.IndexBlockID != hex(64) {
 		t.Fatalf("snapshot not preserved: %+v", stored.Spec)
 	}
 	stored.Spec.Bitcoin.Height++
@@ -106,7 +106,7 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 		},
 		"archive-checksum": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[0].Archive.SHA256 = "abc" },
 		"genesis-digest":   func(s *api.StacksChainstateSnapshotSpec) { s.GenesisDigest = hex(64) },
-		"consensus-hash":   func(s *api.StacksChainstateSnapshotSpec) { s.Stacks.ConsensusHash = hex(64) },
+		"index-block-id":   func(s *api.StacksChainstateSnapshotSpec) { s.Stacks.IndexBlockID = hex(40) },
 		"no-participants":  func(s *api.StacksChainstateSnapshotSpec) { s.Participants = nil },
 		"bitcoin-tip-hash": func(s *api.StacksChainstateSnapshotSpec) { s.Bitcoin.BlockHash = "" },
 		"lock-cycles-range": func(s *api.StacksChainstateSnapshotSpec) {

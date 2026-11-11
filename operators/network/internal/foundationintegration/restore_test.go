@@ -141,7 +141,7 @@ func snapshotOf(
 			Image:         "snapshot:test",
 			GenesisDigest: source.Status.GenesisDigest,
 			Bitcoin:       api.SnapshotBitcoinTip{Height: 217, BlockHash: zeros(64)},
-			Stacks:        api.SnapshotStacksTip{Height: 126, BlockHash: zeros(64), ConsensusHash: zeros(40)},
+			Stacks:        api.SnapshotStacksTip{Height: 126, BlockHash: zeros(64), IndexBlockID: zeros(64)},
 		},
 	}
 	for _, req := range genesis.Spec.Bootstrap.Requirements {

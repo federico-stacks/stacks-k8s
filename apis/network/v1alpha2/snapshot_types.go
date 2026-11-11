@@ -111,9 +111,9 @@ type SnapshotStacksTip struct {
 	// BlockHash is the captured tip block hash.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
 	BlockHash string `json:"blockHash"`
-	// ConsensusHash is the captured tip's consensus hash.
-	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
-	ConsensusHash string `json:"consensusHash"`
+	// IndexBlockID is the captured tip's index block ID, SHA512/256(block hash || consensus hash).
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	IndexBlockID string `json:"indexBlockID"`
 	// RewardCycle is the PoX reward cycle at capture.
 	// +kubebuilder:validation:Minimum=0
 	RewardCycle int64 `json:"rewardCycle"`
