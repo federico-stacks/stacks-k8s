@@ -262,9 +262,28 @@ type GenesisSource struct {
 	NetworkUID types.UID `json:"networkUID"`
 	// InputDigest identifies captured semantic inputs.
 	InputDigest string `json:"inputDigest"`
+	// RestoredImageChanges lists the Stacks actors that run a different image than the one that
+	// wrote their restored data, as the restore's stacksImagePolicy allowed.
+	// +kubebuilder:validation:MaxItems=200
+	// +listType=map
+	// +listMapKey=participant
+	RestoredImageChanges []RestoredImageChange `json:"restoredImageChanges,omitempty"`
 	// Dependencies pins genesis-source identities.
 	// +kubebuilder:validation:MaxItems=1000
 	Dependencies []common.Binding `json:"dependencies,omitempty"`
+}
+
+// RestoredImageChange records one actor that runs another image on restored data.
+type RestoredImageChange struct {
+	// Participant is the network-relative instance name.
+	// +kubebuilder:validation:MaxLength=63
+	Participant string `json:"participant"`
+	// SnapshotImage is the image that wrote the restored data.
+	// +kubebuilder:validation:MaxLength=512
+	SnapshotImage string `json:"snapshotImage"`
+	// Image is the image that runs on the restored data.
+	// +kubebuilder:validation:MaxLength=512
+	Image string `json:"image"`
 }
 
 // StacksGenesisSpec is immutable after a single successful creation.

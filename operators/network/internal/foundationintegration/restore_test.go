@@ -189,13 +189,15 @@ func snapshotOf(
 }
 
 // admitRestoreCopy admits minimal.yaml into another namespace as a restoring network. With
-// importKeys, every account imports the source network's key, so public identities match.
+// importKeys, every account imports the source network's key, so public identities match. A
+// non-empty policy sets the restore's stacksImagePolicy.
 func admitRestoreCopy(
 	t *testing.T,
 	ctx context.Context,
 	c client.Client,
 	source, target, snapshot string,
 	importKeys bool,
+	policy api.StacksImagePolicy,
 ) {
 	t.Helper()
 	path := filepath.Join("..", "..", "..", "..", "docs", "design", "public-api", "examples", "minimal.yaml")
@@ -228,6 +230,9 @@ func admitRestoreCopy(
 		case api.KindStacksNetwork:
 			obj.SetNamespace(target)
 			restore := map[string]any{"snapshotRef": map[string]any{"name": snapshot}}
+			if policy != "" {
+				restore["stacksImagePolicy"] = string(policy)
+			}
 			if err := unstructured.SetNestedField(obj.Object, restore, "spec", "genesis", "restore"); err != nil {
 				t.Fatal(err)
 			}
@@ -300,7 +305,7 @@ func verifyChainstateRestore(
 	frozen := h.drive(t, ctx, sourceNS, func(n *api.StacksNetwork) bool { return n.Status.GenesisRef != nil })
 
 	// Generated keys: an absent snapshot waits, then the cohort mismatch blocks the freeze.
-	admitRestoreCopy(t, ctx, c, sourceNS, "restore-generated", "seed", false)
+	admitRestoreCopy(t, ctx, c, sourceNS, "restore-generated", "seed", false, "")
 	h.drive(t, ctx, "restore-generated", resolvedReason("GenesisInputsUnavailable", "chainstate snapshot unavailable"))
 	if err := c.Create(ctx, snapshotOf(t, ctx, c, frozen, "restore-generated", "seed")); err != nil {
 		t.Fatal(err)
@@ -327,7 +332,7 @@ func verifyChainstateRestore(
 	}
 
 	// Imported keys reproduce the source chain and cohort, so the restore freezes and pins its snapshot.
-	admitRestoreCopy(t, ctx, c, sourceNS, "restore-imported", "seed", true)
+	admitRestoreCopy(t, ctx, c, sourceNS, "restore-imported", "seed", true, "")
 	snapshot := snapshotOf(t, ctx, c, frozen, "restore-imported", "seed")
 	if err := c.Create(ctx, snapshot); err != nil {
 		t.Fatal(err)
@@ -360,5 +365,72 @@ func verifyChainstateRestore(
 	}
 	if !pinned {
 		t.Fatalf("frozen genesis does not pin its snapshot: %+v", genesis.Spec.Source.Dependencies)
+	}
+	if policy := restored.Spec.Genesis.Restore.StacksImagePolicy; policy != api.StacksImagePolicyExact ||
+		genesis.Spec.Source.RestoredImageChanges != nil {
+		t.Fatalf("default policy %q recorded image changes %+v", policy, genesis.Spec.Source.RestoredImageChanges)
+	}
+
+	// A snapshot written by another Stacks build restores only when the network allows it, and the
+	// frozen genesis records the change.
+	verifyStacksImagePolicy(t, ctx, h, frozen, sourceNS)
+}
+
+func verifyStacksImagePolicy(
+	t *testing.T,
+	ctx context.Context,
+	h *restoreHarness,
+	frozen *api.StacksNetwork,
+	sourceNS string,
+) {
+	t.Helper()
+	older := func(ns string) (*api.StacksChainstateSnapshot, api.RestoredImageChange) {
+		snapshot := snapshotOf(t, ctx, h.c, frozen, ns, "seed")
+		for i, p := range snapshot.Spec.Participants {
+			if p.Kind == api.ParticipantStacksNode {
+				change := api.RestoredImageChange{
+					Participant:   p.Name,
+					SnapshotImage: "stacks-node:older",
+					Image:         p.Archive.Image,
+				}
+				snapshot.Spec.Participants[i].Archive.Image = change.SnapshotImage
+				return snapshot, change
+			}
+		}
+		t.Fatal("fixture has no Stacks node")
+		return nil, api.RestoredImageChange{}
+	}
+
+	admitRestoreCopy(t, ctx, h.c, sourceNS, "restore-exact-build", "seed", true, api.StacksImagePolicyExact)
+	snapshot, change := older("restore-exact-build")
+	if err := h.c.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	h.drive(t, ctx, "restore-exact-build", resolvedReason("SnapshotMismatch", change.Participant+" image "))
+
+	admitRestoreCopy(t, ctx, h.c, sourceNS, "restore-new-build", "seed", true, api.StacksImagePolicyAllowDifferent)
+	snapshot, change = older("restore-new-build")
+	if err := h.c.Create(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	restored := h.drive(
+		t,
+		ctx,
+		"restore-new-build",
+		func(n *api.StacksNetwork) bool { return n.Status.GenesisRef != nil },
+	)
+	var genesis api.StacksGenesis
+	if err := h.c.Get(
+		ctx,
+		types.NamespacedName{Namespace: "restore-new-build", Name: restored.Status.GenesisRef.Name},
+		&genesis,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := genesis.Spec.Source.RestoredImageChanges; len(got) != 1 || got[0] != change {
+		t.Fatalf("recorded image changes %+v, want %+v", got, change)
+	}
+	if restored.Status.GenesisDigest != frozen.Status.GenesisDigest {
+		t.Fatal("an image change altered the chain configuration")
 	}
 }

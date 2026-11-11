@@ -12,6 +12,16 @@ const (
 	NetworkOperationStopped NetworkOperation = "Stopped"
 )
 
+// StacksImagePolicy names supported GenesisRestore.StacksImagePolicy values. Unknown input still requires validation.
+type StacksImagePolicy string
+
+const (
+	// StacksImagePolicyExact requires the Stacks node and signer images that wrote the restored data.
+	StacksImagePolicyExact StacksImagePolicy = "Exact"
+	// StacksImagePolicyAllowDifferent lets Stacks nodes and signers run other images on the restored data.
+	StacksImagePolicyAllowDifferent StacksImagePolicy = "AllowDifferent"
+)
+
 // NetworkPhase names supported StacksNetworkStatus.Phase values. Unknown input still requires validation.
 type NetworkPhase string
 

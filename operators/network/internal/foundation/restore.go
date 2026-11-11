@@ -122,13 +122,16 @@ func actorImage(c api.Configuration) string {
 }
 
 // validateRestore checks that a restoring network reproduces the snapshot's chain configuration,
-// its exact initial cohort and the actor images that wrote the captured data.
+// its exact initial cohort and the actor images that wrote the captured data. With
+// AllowDifferent, Stacks nodes and signers may run other images; it returns those changes.
 func validateRestore(
 	snapshot *api.StacksChainstateSnapshot,
 	genesisDigest string,
 	cohort map[string]restoreMember,
-) error {
+	policy api.StacksImagePolicy,
+) ([]api.RestoredImageChange, error) {
 	var problems []string
+	var changes []api.RestoredImageChange
 	if genesisDigest != snapshot.Spec.GenesisDigest {
 		problems = append(
 			problems,
@@ -158,16 +161,22 @@ func validateRestore(
 			problems = append(problems, fmt.Sprintf("%s stake differs", want.Name))
 		}
 		if want.Archive != nil {
-			if image := actorImage(member.configuration); image != want.Archive.Image {
-				problems = append(
-					problems,
-					fmt.Sprintf(
-						"%s image %s differs from %s, which wrote the data",
-						want.Name,
-						image,
-						want.Archive.Image,
-					),
-				)
+			image := actorImage(member.configuration)
+			switch {
+			case image == want.Archive.Image:
+			case policy == api.StacksImagePolicyAllowDifferent && got.Kind != api.ParticipantBitcoinNode:
+				changes = append(changes, api.RestoredImageChange{
+					Participant:   want.Name,
+					SnapshotImage: want.Archive.Image,
+					Image:         image,
+				})
+			default:
+				problem := fmt.Sprintf("%s image %s differs from %s, which wrote the data", want.Name, image,
+					want.Archive.Image)
+				if got.Kind != api.ParticipantBitcoinNode {
+					problem += " (stacksImagePolicy AllowDifferent accepts another Stacks image)"
+				}
+				problems = append(problems, problem)
 			}
 		}
 	}
@@ -188,8 +197,9 @@ func validateRestore(
 			),
 		)
 	}
-	if len(problems) == 0 {
-		return nil
+	if len(problems) > 0 {
+		return nil, &restoreMismatchError{snapshot: snapshot.Name, problems: problems}
 	}
-	return &restoreMismatchError{snapshot: snapshot.Name, problems: problems}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Participant < changes[j].Participant })
+	return changes, nil
 }

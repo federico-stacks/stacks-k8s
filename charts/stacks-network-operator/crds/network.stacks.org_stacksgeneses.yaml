@@ -529,6 +529,39 @@ spec:
                   networkUID:
                     description: NetworkUID identifies this independent environment.
                     type: string
+                  restoredImageChanges:
+                    description: |-
+                      RestoredImageChanges lists the Stacks actors that run a different image than the one that
+                      wrote their restored data, as the restore's stacksImagePolicy allowed.
+                    items:
+                      description: RestoredImageChange records one actor that runs
+                        another image on restored data.
+                      properties:
+                        image:
+                          description: Image is the image that runs on the restored
+                            data.
+                          maxLength: 512
+                          type: string
+                        participant:
+                          description: Participant is the network-relative instance
+                            name.
+                          maxLength: 63
+                          type: string
+                        snapshotImage:
+                          description: SnapshotImage is the image that wrote the restored
+                            data.
+                          maxLength: 512
+                          type: string
+                      required:
+                      - image
+                      - participant
+                      - snapshotImage
+                      type: object
+                    maxItems: 200
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - participant
+                    x-kubernetes-list-type: map
                 required:
                 - inputDigest
                 - networkUID

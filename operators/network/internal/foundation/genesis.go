@@ -403,9 +403,16 @@ func compileGenesis(
 		)
 	}
 	if snapshot != nil {
-		if err := validateRestore(snapshot, Digest(spec.Chain), cohort); err != nil {
+		changes, err := validateRestore(
+			snapshot,
+			Digest(spec.Chain),
+			cohort,
+			root.Spec.Genesis.Restore.StacksImagePolicy,
+		)
+		if err != nil {
 			return spec, err
 		}
+		spec.Source.RestoredImageChanges = changes
 	}
 	spec.Source.InputDigest = semanticInputDigest(spec, all)
 	data, err := json.Marshal(spec)

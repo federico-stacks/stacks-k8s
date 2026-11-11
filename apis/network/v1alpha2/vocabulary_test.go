@@ -15,6 +15,8 @@ func TestVocabularyWireValues(t *testing.T) {
 		{"NetworkOperationRunning", NetworkOperationRunning, `"Running"`},
 		{"NetworkOperationPaused", NetworkOperationPaused, `"Paused"`},
 		{"NetworkOperationStopped", NetworkOperationStopped, `"Stopped"`},
+		{"StacksImagePolicyExact", StacksImagePolicyExact, `"Exact"`},
+		{"StacksImagePolicyAllowDifferent", StacksImagePolicyAllowDifferent, `"AllowDifferent"`},
 		{"NetworkPhaseUninitialized", NetworkPhaseUninitialized, `"Uninitialized"`},
 		{"NetworkPhaseResolving", NetworkPhaseResolving, `"Resolving"`},
 		{"NetworkPhaseResolutionError", NetworkPhaseResolutionError, `"ResolutionError"`},

@@ -469,6 +469,17 @@ spec:
                         required:
                         - name
                         type: object
+                      stacksImagePolicy:
+                        default: Exact
+                        description: |-
+                          StacksImagePolicy decides whether Stacks nodes and signers may run images other than the ones
+                          that wrote the snapshot, for example to compare builds on the same chain. Exact requires the
+                          same images; AllowDifferent accepts others and records each change in the frozen genesis.
+                          Bitcoin node images must always match.
+                        enum:
+                        - Exact
+                        - AllowDifferent
+                        type: string
                     required:
                     - snapshotRef
                     type: object
