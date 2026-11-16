@@ -32,8 +32,11 @@ const (
 )
 
 // tarCommand streams the data root as an uncompressed tar; compression and filtering happen
-// locally, so the export image needs only tar.
-var tarCommand = []string{"tar", "-C", dataMount, "-cf", "-", "."}
+// locally, so the export image needs only sh and tar. The shell then waits for stdin to close
+// before exiting with tar's status. Once the process exits, the cluster ends the exec stream
+// after a short drain, so output still in flight to a slower reader is lost (WebSocket fails,
+// SPDY truncates silently). The capture closes stdin only after the end-of-archive marker.
+var tarCommand = []string{"sh", "-c", "tar -C " + dataMount + " -cf - . ; rc=$?; read -r line; exit $rc"}
 
 // removeExportPods deletes export Pods a previous capture of this network left behind.
 func (c *cluster) removeExportPods(ctx context.Context, networkUID string) error {
@@ -144,19 +147,22 @@ func (c *cluster) export(
 // archive runs tar in the export Pod and rewrites its output into dst.
 func (c *cluster) archive(ctx context.Context, pod string, dst io.Writer) (string, int64, error) {
 	pr, pw := io.Pipe()
+	ackR, ack := io.Pipe()
 	streamed := make(chan error, 1)
 	go func() {
-		err := c.stream(ctx, pod, pw)
+		err := c.stream(ctx, pod, ackR, pw)
 		_ = pw.CloseWithError(err)
 		streamed <- err
 	}()
 	sum, size, err := rewrite(pr, dst)
+	// Closing stdin releases the remote shell: after the whole archive arrived, or on failure.
+	_ = ack.Close()
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		<-streamed
 		return "", 0, err
 	}
-	// Drain the tar padding after the end-of-archive marker so the stream can complete.
+	// Drain any tar padding after the end-of-archive marker so the stream can complete.
 	_, _ = io.Copy(io.Discard, pr)
 	if err = <-streamed; err != nil {
 		return "", 0, err
@@ -174,8 +180,9 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// stream executes tarCommand in the export container, writing its stdout to w.
-func (c *cluster) stream(ctx context.Context, pod string, w io.Writer) error {
+// stream executes tarCommand in the export container, writing its stdout to w; the command exits
+// once stdin reaches EOF.
+func (c *cluster) stream(ctx context.Context, pod string, stdin io.Reader, w io.Writer) error {
 	req := c.core.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(c.namespace).
@@ -184,6 +191,7 @@ func (c *cluster) stream(ctx context.Context, pod string, w io.Writer) error {
 		VersionedParams(&corev1.PodExecOptions{
 			Container: exportContainer,
 			Command:   tarCommand,
+			Stdin:     true,
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
@@ -202,7 +210,8 @@ func (c *cluster) stream(ctx context.Context, pod string, w io.Writer) error {
 		return fmt.Errorf("exec: %w", err)
 	}
 	var stderr limitedBuffer
-	if err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: w, Stderr: &stderr}); err != nil {
+	options := remotecommand.StreamOptions{Stdin: stdin, Stdout: w, Stderr: &stderr}
+	if err = executor.StreamWithContext(ctx, options); err != nil {
 		if detail := strings.TrimSpace(stderr.String()); detail != "" {
 			return fmt.Errorf("tar: %w: %s", err, detail)
 		}
