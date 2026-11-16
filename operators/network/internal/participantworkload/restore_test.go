@@ -4,22 +4,20 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func restoreFixture() *chainstateRestore {
@@ -66,80 +64,71 @@ func TestRestoreInitPrecedesActorChecks(t *testing.T) {
 				init.VolumeMounts[0].MountPath != "/data" {
 				t.Fatalf("restore must see only the data volume, without credentials: %+v", init)
 			}
+			// Namespaces with a ResourceQuota require bounds on every container.
+			if !reflect.DeepEqual(init.Resources, pod.Containers[0].Resources) {
+				t.Fatalf("restore resources %+v, actor %+v", init.Resources, pod.Containers[0].Resources)
+			}
 		})
 	}
 }
 
+// The archive comes from the frozen genesis alone, by participant UID: no snapshot resource is
+// read, so deleting or recreating the snapshot after freeze cannot affect a restored network.
 func TestChainstateRestoreForSelectsRestoredMembersOnly(t *testing.T) {
-	ctx := context.Background()
-	snapshot := &api.StacksChainstateSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "seed", Namespace: "test", UID: "snapshot-uid"},
-		Spec: api.StacksChainstateSnapshotSpec{
-			Image: "snapshot:test",
-			Participants: []api.SnapshotParticipant{
-				{Name: "actor-stacksnode", Kind: "StacksNode", Archive: &restoreFixture().archive},
-				{Name: "stacker-01", Kind: "StacksStacker"},
-			},
-		},
+	archive := restoreFixture().archive
+	restored := &api.StacksGenesis{Spec: api.StacksGenesisSpec{
+		Source: api.GenesisSource{Restored: &api.RestoredChainstate{Image: "snapshot:test"}},
+		Bootstrap: api.Bootstrap{Requirements: []api.BootstrapRequirement{
+			{Kind: "StacksNode", Participant: common.Binding{UID: "node-uid"}, RestoredArchive: &archive},
+			{Kind: "StacksStacker", Participant: common.Binding{UID: "stacker-uid"}},
+		}},
+	}}
+	fromGenesis := restored.DeepCopy()
+	fromGenesis.Spec.Source.Restored = nil
+	withUID := func(name, uid string) *api.StacksNetworkParticipant {
+		p := stacksParticipantFixture("StacksNode")
+		p.Spec.ParticipantName, p.UID = name, types.UID(uid)
+		return p
 	}
-	pinned := common.Binding{
-		Kind:        api.KindStacksChainstateSnapshot,
-		Name:        "seed",
-		UID:         "snapshot-uid",
-		Fingerprint: digest(snapshot.Spec),
-	}
-	root := &api.StacksNetwork{
-		ObjectMeta: metav1.ObjectMeta{Name: "network", Namespace: "test"},
-		Status:     api.StacksNetworkStatus{GenesisRef: &common.Binding{Name: "genesis"}},
-	}
-	genesis := func(dependencies ...common.Binding) *api.StacksGenesis {
-		return &api.StacksGenesis{
-			ObjectMeta: metav1.ObjectMeta{Name: "genesis", Namespace: "test"},
-			Spec:       api.StacksGenesisSpec{Source: api.GenesisSource{Dependencies: dependencies}},
-		}
-	}
-	node := stacksParticipantFixture("StacksNode")
-	late := stacksParticipantFixture("StacksNode")
-	late.Spec.ParticipantName = "node-02"
 	for name, tc := range map[string]struct {
-		objects []client.Object
+		genesis *api.StacksGenesis
 		p       *api.StacksNetworkParticipant
 		archive bool
-		fails   string
 	}{
-		"restored member":  {objects: []client.Object{genesis(pinned), snapshot}, p: node, archive: true},
-		"late participant": {objects: []client.Object{genesis(pinned), snapshot}, p: late},
-		"genesis network":  {objects: []client.Object{genesis()}, p: node},
-		"snapshot deleted": {objects: []client.Object{genesis(pinned)}, p: node, fails: "seed unavailable"},
-		"snapshot replaced": {
-			objects: []client.Object{genesis(pinned), snapshotWithUID(snapshot, "other")},
-			p:       node,
-			fails:   "identity changed",
-		},
+		"restored member":  {restored, withUID("node-01", "node-uid"), true},
+		"late participant": {restored, withUID("node-02", "late-uid"), false},
+		// A replacement reuses the name but is a new instance, which starts empty.
+		"replaced member": {restored, withUID("node-01", "replacement-uid"), false},
+		"genesis network": {fromGenesis, withUID("node-01", "node-uid"), false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := &Reconciler{Reader: testClient(t, tc.objects...)}
-			restore, err := r.chainstateRestoreFor(ctx, root, tc.p)
-			if tc.fails != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.fails) {
-					t.Fatalf("got %v, want %q", err, tc.fails)
-				}
-				return
+			restore := chainstateRestoreFor(tc.genesis, tc.p)
+			if (restore != nil) != tc.archive {
+				t.Fatalf("restore %+v", restore)
 			}
-			if err != nil || (restore != nil) != tc.archive {
-				t.Fatalf("restore %+v, err %v", restore, err)
-			}
-			if restore != nil && (restore.image != "snapshot:test" || restore.archive.Path != "node-01.tar.gz") {
+			if restore != nil && (restore.image != "snapshot:test" || restore.archive != archive) {
 				t.Fatalf("wrong archive: %+v", restore)
 			}
 		})
 	}
 }
 
-func snapshotWithUID(s *api.StacksChainstateSnapshot, uid string) *api.StacksChainstateSnapshot {
-	other := s.DeepCopy()
-	other.UID = types.UID(uid)
-	return other
+func TestRestoreImageUnavailableReportsPullFailures(t *testing.T) {
+	waiting := func(name, reason string) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+			Name:  name,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+		}}}}
+	}
+	for _, reason := range []string{"ErrImagePull", "ImagePullBackOff", "InvalidImageName"} {
+		if !restoreImageUnavailable(waiting(restoreContainer, reason)) {
+			t.Fatalf("%s not reported", reason)
+		}
+	}
+	if restoreImageUnavailable(waiting(restoreContainer, "PodInitializing")) ||
+		restoreImageUnavailable(waiting("config-check", "ImagePullBackOff")) {
+		t.Fatal("only the restore container's pull failures are restore failures")
+	}
 }
 
 func TestInitContainerFailedDistinguishesExitCodes(t *testing.T) {
@@ -183,6 +172,9 @@ func TestRestoreScriptExtractsOnce(t *testing.T) {
 		"node/nakamoto-neon/chainstate/index.sqlite":   "chain",
 		"node/nakamoto-neon/chainstate/mempool.sqlite": "pending",
 		"node/nakamoto-neon/peer.sqlite":               "peers",
+		"node/nakamoto-neon/peer.sqlite-wal":           "peer log",
+		// An archive captured from a restored network carries that network's marker.
+		".chainstate-restore": "source network archive checksum",
 	} {
 		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o640, Size: int64(len(content))}); err != nil {
 			t.Fatal(err)
@@ -220,16 +212,22 @@ func TestRestoreScriptExtractsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	chain := filepath.Join(data, "node/nakamoto-neon/chainstate/index.sqlite")
+	marker := filepath.Join(data, ".chainstate-restore")
 	for path, present := range map[string]bool{
 		chain: true,
 		stale: false,
 		filepath.Join(data, "node/nakamoto-neon/peer.sqlite"):               false,
+		filepath.Join(data, "node/nakamoto-neon/peer.sqlite-wal"):           false,
 		filepath.Join(data, "node/nakamoto-neon/chainstate/mempool.sqlite"): false,
-		filepath.Join(data, ".chainstate-restore"):                          true,
+		marker: true,
 	} {
 		if _, err := os.Stat(path); (err == nil) != present {
 			t.Fatalf("%s present=%v after restore", path, err == nil)
 		}
+	}
+	// #nosec G304 -- Path is inside the test's private temporary directory.
+	if got, _ := os.ReadFile(marker); strings.TrimSpace(string(got)) != hex.EncodeToString(sum[:]) {
+		t.Fatalf("marker must record this archive's checksum, got %q", got)
 	}
 	// A later start keeps the actor's own writes: the marker skips extraction.
 	if err := os.WriteFile(chain, []byte("advanced"), 0o600); err != nil {
@@ -241,5 +239,17 @@ func TestRestoreScriptExtractsOnce(t *testing.T) {
 	// #nosec G304 -- Path is inside the test's private temporary directory.
 	if got, _ := os.ReadFile(chain); string(got) != "advanced" {
 		t.Fatalf("restart re-extracted the snapshot: %q", got)
+	}
+	// An extraction interrupted right after the archive's own marker was unpacked leaves a marker
+	// that does not match this archive: the next start must extract again.
+	if err := os.WriteFile(marker, []byte("source network archive checksum\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- Path is inside the test's private temporary directory.
+	if got, _ := os.ReadFile(chain); string(got) != "chain" {
+		t.Fatalf("a foreign marker skipped extraction: %q", got)
 	}
 }

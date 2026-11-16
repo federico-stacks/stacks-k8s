@@ -6,9 +6,9 @@ import (
 	"time"
 
 	bitcoin "github.com/cylewitruk-stacks/stacks-k8s/apis/network/bitcoin/v1alpha2"
+	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
-	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/objectref"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -94,12 +94,8 @@ func (r *Reconciler) projectGates(
 	if state.Completed {
 		return false, nil
 	}
-	snapshot, err := foundation.RestoredSnapshot(ctx, r.Reader, genesis)
-	if err != nil {
-		return false, err
-	}
-	if snapshot != nil {
-		completeByRestore(state, genesis.Spec.Bootstrap.Gates, record, snapshot)
+	if restoredFrom, restored := foundation.RestoredFrom(genesis); restored {
+		completeByRestore(state, genesis.Spec.Bootstrap.Gates, record, restoredFrom)
 		return false, nil
 	}
 	gate := genesis.Spec.Bootstrap.Gates[state.GateIndex]
@@ -209,7 +205,7 @@ func completeByRestore(
 	state *api.InitializationStatus,
 	gates []api.Gate,
 	record *bitcoin.BitcoinInitialization,
-	snapshot *api.StacksChainstateSnapshot,
+	restoredFrom common.Binding,
 ) {
 	if record.Status.PreparedAt == nil {
 		return
@@ -222,7 +218,6 @@ func completeByRestore(
 	// Completed state retains the final ceiling, exactly as gate-by-gate completion leaves it.
 	state.AuthorizedCeiling = gates[len(gates)-1].BitcoinCeiling
 	state.Completed = true
-	restoredFrom := objectref.WithFingerprint(objectref.ChainstateSnapshot(snapshot), foundation.Digest(snapshot.Spec))
 	state.RestoredFrom = &restoredFrom
 }
 

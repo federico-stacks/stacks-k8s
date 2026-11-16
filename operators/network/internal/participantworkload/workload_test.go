@@ -331,8 +331,8 @@ func TestFreshAdmissionAndGenesisGates(t *testing.T) {
 	root.Status.GenesisDigest = digest(genesis.Spec.Chain)
 	c := testClient(t, p, root, genesis)
 	r := Reconciler{Client: c, Reader: c}
-	if err := r.authorized(context.Background(), root, p); err != nil {
-		t.Fatal(err)
+	if verified, err := r.authorized(context.Background(), root, p); err != nil || verified.UID != genesis.UID {
+		t.Fatalf("authorized: %v, genesis %+v", err, verified)
 	}
 	for _, mutate := range []func(*api.StacksNetwork){
 		func(n *api.StacksNetwork) { n.Spec.Operation = "Stopped" },
@@ -343,7 +343,7 @@ func TestFreshAdmissionAndGenesisGates(t *testing.T) {
 	} {
 		current := root.DeepCopy()
 		mutate(current)
-		if err := r.authorized(context.Background(), current, p); err == nil {
+		if _, err := r.authorized(context.Background(), current, p); err == nil {
 			t.Fatal("accepted invalid lifecycle/genesis identity")
 		}
 	}

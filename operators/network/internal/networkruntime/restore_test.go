@@ -8,6 +8,7 @@ import (
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -32,6 +33,7 @@ func restoreFixture(restored bool) (
 			UID:         snapshot.UID,
 			Fingerprint: foundation.Digest(snapshot.Spec),
 		})
+		g.Spec.Source.Restored = &api.RestoredChainstate{Image: snapshot.Spec.Image}
 		root.Status.GenesisRef.Fingerprint = foundation.Digest(g.Spec)
 	}
 	first := metav1.NewTime(time.Now().Add(-3 * time.Minute).Truncate(time.Second))
@@ -93,27 +95,27 @@ func TestRestoredPreparationCompletesEveryGate(t *testing.T) {
 		ref.Name != "seed" || ref.UID != "snapshot" || ref.Fingerprint != foundation.Digest(snapshot.Spec) {
 		t.Fatalf("completion does not pin its snapshot: %+v", state.RestoredFrom)
 	}
-	// Completion is retained: a later pass neither re-reads the snapshot nor changes the record.
-	if err := r.Client.Delete(t.Context(), snapshot); err != nil {
-		t.Fatal(err)
-	}
+	// Completion is retained: a later pass changes nothing.
 	before := state.DeepCopy()
 	if _, err := r.reconcileGates(t.Context(), root, record, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !before.Completed || root.Status.Initialization.RestoredFrom == nil ||
-		!root.Status.Initialization.Completed {
-		t.Fatalf("completed restore was not retained: %+v", root.Status.Initialization)
+	if !equality.Semantic.DeepEqual(before, root.Status.Initialization) {
+		t.Fatalf("completed restore changed: %+v, before %+v", root.Status.Initialization, before)
 	}
 }
 
-func TestRestoredGatesNeedTheirSnapshot(t *testing.T) {
-	root, g, _, record := restoreFixture(true)
+// The genesis freezes everything restore completion needs, so the snapshot resource may be gone.
+func TestRestoredGatesCompleteWithoutTheSnapshotResource(t *testing.T) {
+	root, g, snapshot, record := restoreFixture(true)
+	prepared := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
+	record.Status.PreparedAt = &prepared
 	r := fixtureReconciler(t, g, record)
-	if _, err := r.reconcileGates(t.Context(), root, record, nil); err == nil {
-		t.Fatal("a pinned snapshot that no longer exists must not be guessed around")
+	if failed, err := r.reconcileGates(t.Context(), root, record, nil); err != nil || failed {
+		t.Fatalf("failed=%v err=%v", failed, err)
 	}
-	if root.Status.Initialization != nil && root.Status.Initialization.Completed {
-		t.Fatal("completed without the pinned snapshot")
+	state := root.Status.Initialization
+	if !state.Completed || state.RestoredFrom == nil || state.RestoredFrom.UID != snapshot.UID {
+		t.Fatalf("restore did not complete from the frozen genesis alone: %+v", state)
 	}
 }

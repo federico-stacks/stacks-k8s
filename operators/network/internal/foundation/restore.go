@@ -1,7 +1,6 @@
 package foundation
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,41 +8,23 @@ import (
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Restored reports whether a frozen genesis pins a chainstate snapshot: the network was restored
-// from captured chain data instead of initialized from genesis.
+// Restored reports whether a frozen genesis was restored from captured chain data instead of
+// initialized from genesis. Everything a restored network uses is frozen in the genesis, so no
+// consumer reads the snapshot resource after freeze.
 func Restored(genesis *api.StacksGenesis) bool {
-	for _, b := range genesis.Spec.Source.Dependencies {
-		if b.Kind == api.KindStacksChainstateSnapshot {
-			return true
-		}
-	}
-	return false
+	return genesis.Spec.Source.Restored != nil
 }
 
-// RestoredSnapshot returns the chainstate snapshot a frozen genesis pins, or nil for a network
-// initialized from genesis. The snapshot must still exist with its pinned identity and content.
-func RestoredSnapshot(
-	ctx context.Context,
-	reader client.Reader,
-	genesis *api.StacksGenesis,
-) (*api.StacksChainstateSnapshot, error) {
+// RestoredFrom returns the binding of the snapshot a restored genesis pins, as evidence.
+func RestoredFrom(genesis *api.StacksGenesis) (common.Binding, bool) {
 	for _, b := range genesis.Spec.Source.Dependencies {
-		if b.Kind != api.KindStacksChainstateSnapshot {
-			continue
+		if b.Kind == api.KindStacksChainstateSnapshot {
+			return b, Restored(genesis)
 		}
-		var snapshot api.StacksChainstateSnapshot
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: genesis.Namespace, Name: b.Name}, &snapshot); err != nil {
-			return nil, fmt.Errorf("chainstate snapshot %s unavailable", b.Name)
-		}
-		if snapshot.UID != b.UID || snapshot.DeletionTimestamp != nil || Digest(snapshot.Spec) != b.Fingerprint {
-			return nil, fmt.Errorf("chainstate snapshot %s identity changed", b.Name)
-		}
-		return &snapshot, nil
 	}
-	return nil, nil
+	return common.Binding{}, false
 }
 
 // restoreMember pairs one initial cohort requirement with its compiled policy.
@@ -123,15 +104,17 @@ func actorImage(c api.Configuration) string {
 
 // validateRestore checks that a restoring network reproduces the snapshot's chain configuration,
 // its exact initial cohort and the actor images that wrote the captured data. With
-// AllowDifferent, Stacks nodes and signers may run other images; it returns those changes.
+// AllowDifferent, Stacks nodes and signers may run other images. On success it returns the facts
+// the genesis freezes: the restored chainstate and each actor's archive by cohort name.
 func validateRestore(
 	snapshot *api.StacksChainstateSnapshot,
 	genesisDigest string,
 	cohort map[string]restoreMember,
 	policy api.StacksImagePolicy,
-) ([]api.RestoredImageChange, error) {
+) (*api.RestoredChainstate, map[string]api.SnapshotArchive, error) {
 	var problems []string
 	var changes []api.RestoredImageChange
+	archives := map[string]api.SnapshotArchive{}
 	if genesisDigest != snapshot.Spec.GenesisDigest {
 		problems = append(
 			problems,
@@ -161,6 +144,7 @@ func validateRestore(
 			problems = append(problems, fmt.Sprintf("%s stake differs", want.Name))
 		}
 		if want.Archive != nil {
+			archives[want.Name] = *want.Archive
 			image := actorImage(member.configuration)
 			switch {
 			case image == want.Archive.Image:
@@ -198,8 +182,12 @@ func validateRestore(
 		)
 	}
 	if len(problems) > 0 {
-		return nil, &restoreMismatchError{snapshot: snapshot.Name, problems: problems}
+		return nil, nil, &restoreMismatchError{snapshot: snapshot.Name, problems: problems}
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Participant < changes[j].Participant })
-	return changes, nil
+	return &api.RestoredChainstate{
+		Image:        snapshot.Spec.Image,
+		Bitcoin:      snapshot.Spec.Bitcoin,
+		ImageChanges: changes,
+	}, archives, nil
 }

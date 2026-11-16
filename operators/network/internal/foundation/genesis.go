@@ -403,7 +403,7 @@ func compileGenesis(
 		)
 	}
 	if snapshot != nil {
-		changes, err := validateRestore(
+		restored, archives, err := validateRestore(
 			snapshot,
 			Digest(spec.Chain),
 			cohort,
@@ -412,7 +412,16 @@ func compileGenesis(
 		if err != nil {
 			return spec, err
 		}
-		spec.Source.RestoredImageChanges = changes
+		// Freeze what the restored network uses, so the snapshot resource is not needed after freeze.
+		spec.Source.Restored = restored
+		for name, archive := range archives {
+			uid := cohort[name].requirement.Participant.UID
+			for i := range spec.Bootstrap.Requirements {
+				if spec.Bootstrap.Requirements[i].Participant.UID == uid {
+					spec.Bootstrap.Requirements[i].RestoredArchive = archive.DeepCopy()
+				}
+			}
+		}
 	}
 	spec.Source.InputDigest = semanticInputDigest(spec, all)
 	data, err := json.Marshal(spec)

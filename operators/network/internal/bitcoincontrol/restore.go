@@ -17,26 +17,28 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// restoredSnapshot returns the chainstate snapshot pinned by the network's exact frozen genesis.
-// It returns nil when the network was initialized from genesis, and also when the frozen genesis
-// cannot be established: the bootstrap path then reports that failure through its own gate checks.
-func restoredSnapshot(
+// restoredChainstate returns the restore facts frozen in the network's exact genesis, or nil for a
+// network initialized from genesis. It fails when the genesis cannot be established, so a failed
+// read never selects the bootstrap path for a restored chain.
+func restoredChainstate(
 	ctx context.Context,
 	reader client.Reader,
 	root *api.StacksNetwork,
 	initial *bitcoin.BitcoinInitialization,
-) (*api.StacksChainstateSnapshot, error) {
+) (*api.RestoredChainstate, error) {
 	ref := root.Status.GenesisRef
 	if ref == nil || *ref != initial.Spec.Genesis {
-		return nil, nil
+		return nil, errors.New("frozen genesis binding unavailable")
 	}
 	var genesis api.StacksGenesis
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: root.Namespace, Name: ref.Name}, &genesis); err != nil ||
-		genesis.UID != ref.UID || genesis.DeletionTimestamp != nil || !metav1.IsControlledBy(&genesis, root) ||
-		foundation.Digest(genesis.Spec) != ref.Fingerprint {
-		return nil, nil //nolint:nilerr // An unestablished genesis is reported by the gate checks, not here.
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: root.Namespace, Name: ref.Name}, &genesis); err != nil {
+		return nil, err
 	}
-	return foundation.RestoredSnapshot(ctx, reader, &genesis)
+	if genesis.UID != ref.UID || genesis.DeletionTimestamp != nil || !metav1.IsControlledBy(&genesis, root) ||
+		foundation.Digest(genesis.Spec) != ref.Fingerprint {
+		return nil, errors.New("frozen genesis identity differs")
+	}
+	return genesis.Spec.Source.Restored, nil
 }
 
 // reconcileRestore prepares Bitcoin for a network restored from a chainstate snapshot. Instead of
@@ -48,7 +50,7 @@ func (s *Scheduler) reconcileRestore(
 	ctx context.Context,
 	root *api.StacksNetwork,
 	record *bitcoin.BitcoinInitialization,
-	snapshot *api.StacksChainstateSnapshot,
+	chainstate *api.RestoredChainstate,
 	report func(bitcoin.InitializationPhase, string) (ctrl.Result, error),
 ) (ctrl.Result, error) {
 	record.Status.NextOpportunityAt = nil
@@ -79,7 +81,7 @@ func (s *Scheduler) reconcileRestore(
 	if !restoredMinersFunded(record, view.mature) {
 		return report(bitcoin.InitializationBlocked, reasonRestoredWalletsImmature)
 	}
-	restored := snapshot.Spec.Bitcoin
+	restored := chainstate.Bitcoin
 	offer := record.Status.Offer
 	if offer != nil && offer.Mode == bitcoin.OfferRestore && offer.Number <= record.Status.LastAccountedOffer {
 		if view.height == restored.Height && view.tip == restored.BlockHash {
@@ -186,9 +188,9 @@ func (w *Worker) authorizeRestoreOffer(ctx context.Context, a admitted, offer *b
 		offer.Address != initial.Spec.PayoutWallet.Address {
 		return errors.New("restore refresh is not authorized")
 	}
-	snapshot, err := restoredSnapshot(ctx, w.Reader, a.root, initial)
-	if err != nil || snapshot == nil || offer.ExpectedHeight != snapshot.Spec.Bitcoin.Height ||
-		offer.ExpectedTip != snapshot.Spec.Bitcoin.BlockHash {
+	chainstate, err := restoredChainstate(ctx, w.Reader, a.root, initial)
+	if err != nil || chainstate == nil || offer.ExpectedHeight != chainstate.Bitcoin.Height ||
+		offer.ExpectedTip != chainstate.Bitcoin.BlockHash {
 		return errors.New("restore refresh does not extend the snapshot tip")
 	}
 	return nil

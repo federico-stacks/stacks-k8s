@@ -25,6 +25,8 @@ const (
 	reasonBaselineTargetSelected = "BaselineTargetSelected"
 	// reasonBootstrapGateAuthorityUnavailable reports BootstrapGateAuthorityUnavailable.
 	reasonBootstrapGateAuthorityUnavailable = "BootstrapGateAuthorityUnavailable"
+	// reasonFrozenGenesisUnavailable reports FrozenGenesisUnavailable.
+	reasonFrozenGenesisUnavailable = "FrozenGenesisUnavailable"
 	// reasonCadenceArmed reports CadenceArmed.
 	reasonCadenceArmed = "CadenceArmed"
 	// reasonCadenceUnavailable reports CadenceUnavailable.
@@ -95,8 +97,6 @@ const (
 	reasonReplacementWorkInsufficient = "ReplacementWorkInsufficient"
 	// reasonRestorePrepared reports RestorePrepared.
 	reasonRestorePrepared = "RestorePrepared"
-	// reasonRestoreSnapshotUnavailable reports RestoreSnapshotUnavailable.
-	reasonRestoreSnapshotUnavailable = "RestoreSnapshotUnavailable"
 	// reasonRestoredChainDiffers reports RestoredChainDiffers.
 	reasonRestoredChainDiffers = "RestoredChainDiffers"
 	// reasonRestoredWalletsImmature reports RestoredWalletsImmature.

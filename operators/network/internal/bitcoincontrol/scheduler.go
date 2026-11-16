@@ -137,13 +137,13 @@ func (s *Scheduler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.R
 		return report(bitcoin.InitializationAbandoned, api.ReasonNetworkStopped)
 	}
 	// A restored chain is already past every frozen ceiling: it is proven, not generated.
-	snapshot, e := restoredSnapshot(ctx, s.Reader, root, record)
+	chainstate, e := restoredChainstate(ctx, s.Reader, root, record)
 	if e != nil {
 		record.Status.NextOpportunityAt = nil
-		return report(bitcoin.InitializationBlocked, reasonRestoreSnapshotUnavailable)
+		return report(bitcoin.InitializationHeld, reasonFrozenGenesisUnavailable)
 	}
-	if snapshot != nil {
-		return s.reconcileRestore(ctx, root, record, snapshot, report)
+	if chainstate != nil {
+		return s.reconcileRestore(ctx, root, record, chainstate, report)
 	}
 	if record.Status.PreparedAt == nil && record.Status.FirstCeilingObservedAt != nil &&
 		!s.Now().Before(record.Status.FirstCeilingObservedAt.Add(120*time.Second)) {

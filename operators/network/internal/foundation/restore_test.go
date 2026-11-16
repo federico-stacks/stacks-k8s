@@ -48,7 +48,11 @@ func restoreFixture() (map[string]restoreMember, *api.StacksChainstateSnapshot) 
 	}
 	snapshot := &api.StacksChainstateSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "seed"},
-		Spec:       api.StacksChainstateSnapshotSpec{GenesisDigest: "sha256:chain"},
+		Spec: api.StacksChainstateSnapshotSpec{
+			Image:         "snapshot:1",
+			GenesisDigest: "sha256:chain",
+			Bitcoin:       api.SnapshotBitcoinTip{Height: 205, BlockHash: strings.Repeat("b", 64)},
+		},
 	}
 	for _, name := range []string{"btc-01", "node-01", "stacker-01"} {
 		p := snapshotParticipant(name, cohort[name].requirement)
@@ -71,8 +75,15 @@ func TestSnapshotParticipantProjectsPublicValuesOnly(t *testing.T) {
 
 func TestValidateRestoreAcceptsMatchingCohort(t *testing.T) {
 	cohort, snapshot := restoreFixture()
-	if _, err := validateRestore(snapshot, "sha256:chain", cohort, ""); err != nil {
+	restored, archives, err := validateRestore(snapshot, "sha256:chain", cohort, "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The genesis freezes the image, the Bitcoin tip and exactly the actors' archives.
+	if restored.Image != "snapshot:1" || restored.Bitcoin != snapshot.Spec.Bitcoin || restored.ImageChanges != nil ||
+		len(archives) != 2 || archives["btc-01"].Path != "btc-01.tar.gz" ||
+		archives["node-01"].Path != "node-01.tar.gz" {
+		t.Fatalf("frozen restore facts: %+v %+v", restored, archives)
 	}
 	// Per-network bindings, account order and worker policy are outside the comparison.
 	member := cohort["node-01"]
@@ -84,7 +95,7 @@ func TestValidateRestoreAcceptsMatchingCohort(t *testing.T) {
 	member.requirement.Accounts[0].Binding.UID = "other-network"
 	member.requirement.PolicyDigest = "sha256:other-resources"
 	cohort["node-01"] = member
-	if _, err := validateRestore(snapshot, "sha256:chain", cohort, ""); err != nil {
+	if _, _, err := validateRestore(snapshot, "sha256:chain", cohort, ""); err != nil {
 		t.Fatalf("non-consensus differences rejected: %v", err)
 	}
 }
@@ -157,7 +168,7 @@ func TestValidateRestoreReportsEveryDifference(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cohort, snapshot := restoreFixture()
 			tc.mutate(cohort, snapshot)
-			_, err := validateRestore(snapshot, "sha256:chain", cohort, api.StacksImagePolicyExact)
+			_, _, err := validateRestore(snapshot, "sha256:chain", cohort, api.StacksImagePolicyExact)
 			var mismatch *restoreMismatchError
 			if !errors.As(err, &mismatch) || !strings.Contains(err.Error(), tc.want) ||
 				!strings.HasPrefix(err.Error(), "snapshot seed does not match: ") {
@@ -184,21 +195,21 @@ func TestValidateRestoreStacksImagePolicy(t *testing.T) {
 	}
 	_, snapshot := restoreFixture()
 
-	changes, err := validateRestore(snapshot, "sha256:chain", withImages("stacks:2", "bitcoin:1"),
+	restored, _, err := validateRestore(snapshot, "sha256:chain", withImages("stacks:2", "bitcoin:1"),
 		api.StacksImagePolicyAllowDifferent)
 	want := api.RestoredImageChange{Participant: "node-01", SnapshotImage: "stacks:1", Image: "stacks:2"}
-	if err != nil || len(changes) != 1 || changes[0] != want {
-		t.Fatalf("AllowDifferent: %v %+v", err, changes)
+	if err != nil || len(restored.ImageChanges) != 1 || restored.ImageChanges[0] != want {
+		t.Fatalf("AllowDifferent: %v %+v", err, restored)
 	}
 
-	changes, err = validateRestore(snapshot, "sha256:chain", withImages("stacks:1", "bitcoin:1"),
+	restored, _, err = validateRestore(snapshot, "sha256:chain", withImages("stacks:1", "bitcoin:1"),
 		api.StacksImagePolicyAllowDifferent)
-	if err != nil || changes != nil {
-		t.Fatalf("unchanged images recorded: %v %+v", err, changes)
+	if err != nil || restored.ImageChanges != nil {
+		t.Fatalf("unchanged images recorded: %v %+v", err, restored)
 	}
 
 	// Bitcoin node images must match under every policy.
-	_, err = validateRestore(snapshot, "sha256:chain", withImages("stacks:2", "bitcoin:2"),
+	_, _, err = validateRestore(snapshot, "sha256:chain", withImages("stacks:2", "bitcoin:2"),
 		api.StacksImagePolicyAllowDifferent)
 	// The Bitcoin problem carries no AllowDifferent hint, and the allowed Stacks change is no problem.
 	const bitcoinProblem = "btc-01 image bitcoin:2 differs from bitcoin:1, which wrote the data"
@@ -207,7 +218,8 @@ func TestValidateRestoreStacksImagePolicy(t *testing.T) {
 	}
 
 	for _, policy := range []api.StacksImagePolicy{"", api.StacksImagePolicyExact} {
-		if _, err = validateRestore(snapshot, "sha256:chain", withImages("stacks:2", "bitcoin:1"), policy); err == nil {
+		_, _, err = validateRestore(snapshot, "sha256:chain", withImages("stacks:2", "bitcoin:1"), policy)
+		if err == nil {
 			t.Fatalf("policy %q accepted a Stacks image change", policy)
 		}
 	}

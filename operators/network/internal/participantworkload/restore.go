@@ -1,29 +1,27 @@
 package participantworkload
 
 import (
-	"context"
-	"fmt"
-
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
-	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // restoreContainer names the init container that fills a restored actor's data volume.
 const restoreContainer = "restore-data"
 
-// restoreScript extracts one snapshot archive into /data once. The marker is written only after a
-// complete extraction, so an interrupted attempt is discarded and repeated on the next start.
-// Peer databases and mempools are dropped: they hold the source network's peers and transactions.
+// restoreScript extracts one snapshot archive into /data once. The marker records the archive's
+// checksum and is written only after a complete, synced extraction, so an interrupted attempt is
+// discarded and repeated on the next start. A marker the archive itself carries (one captured from
+// a restored network) never matches: no archive can contain its own checksum. Peer databases and
+// mempools are dropped: they hold the source network's peers and transactions.
 const restoreScript = `marker=/data/.chainstate-restore
-[ -f "$marker" ] && exit 0
+[ "$(cat "$marker" 2>/dev/null)" = "$2" ] && exit 0
 archive="/snapshot/$1"
-[ "$(sha256sum "$archive" | cut -d ' ' -f 1)" = "$2" ] || { echo "archive checksum mismatch" >&2; exit 1; }
+[ "$(sha256sum <"$archive" | cut -d ' ' -f 1)" = "$2" ] || { echo "archive checksum mismatch" >&2; exit 1; }
 find /data -mindepth 1 -delete
 tar -xzf "$archive" -C /data
-find /data \( -name peer.sqlite -o -name 'mempool.sqlite*' \) -delete
+find /data \( -name 'peer.sqlite*' -o -name 'mempool.sqlite*' \) -delete
+sync
 echo "$2" >"$marker"`
 
 // chainstateRestore selects one actor archive of a chainstate snapshot.
@@ -32,41 +30,31 @@ type chainstateRestore struct {
 	archive api.SnapshotArchive
 }
 
-// chainstateRestoreFor returns the participant's archive when its network was restored from a
-// snapshot. Networks initialized from genesis, and participants added after a restore, start empty.
-// The snapshot must remain available while the network runs: every actor start uses its image.
-func (r *Reconciler) chainstateRestoreFor(
-	ctx context.Context,
-	root *api.StacksNetwork,
-	p *api.StacksNetworkParticipant,
-) (*chainstateRestore, error) {
-	var genesis api.StacksGenesis
-	if err := r.Reader.Get(
-		ctx,
-		client.ObjectKey{Namespace: root.Namespace, Name: root.Status.GenesisRef.Name},
-		&genesis,
-	); err != nil {
-		return nil, fmt.Errorf("genesis unavailable")
+// chainstateRestoreFor returns the participant's archive when it is an initial actor of a restored
+// network. It reads only the frozen genesis, so the snapshot resource is not needed after freeze.
+// Networks initialized from genesis, and participants added after a restore, start empty.
+func chainstateRestoreFor(genesis *api.StacksGenesis, p *api.StacksNetworkParticipant) *chainstateRestore {
+	restored := genesis.Spec.Source.Restored
+	if restored == nil {
+		return nil
 	}
-	snapshot, err := foundation.RestoredSnapshot(ctx, r.Reader, &genesis)
-	if err != nil || snapshot == nil {
-		return nil, err
-	}
-	for _, member := range snapshot.Spec.Participants {
-		if member.Name == p.Spec.ParticipantName && member.Kind == p.Spec.Kind && member.Archive != nil {
-			return &chainstateRestore{image: snapshot.Spec.Image, archive: *member.Archive}, nil
+	for _, required := range genesis.Spec.Bootstrap.Requirements {
+		if required.Participant.UID == p.UID && required.RestoredArchive != nil {
+			return &chainstateRestore{image: restored.Image, archive: *required.RestoredArchive}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
-// restoreInit runs before every other actor container, with the actor's own non-root identity.
-func restoreInit(restore *chainstateRestore) corev1.Container {
+// restoreInit runs before every other actor container, with the actor's own non-root identity and
+// resource bounds.
+func restoreInit(restore *chainstateRestore, resources corev1.ResourceRequirements) corev1.Container {
 	return corev1.Container{
 		Name:            restoreContainer,
 		Image:           restore.image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{"sh", "-ec", restoreScript, "--", restore.archive.Path, restore.archive.SHA256},
+		Resources:       resources,
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: ptr.To(false),
 			ReadOnlyRootFilesystem:   ptr.To(true),
@@ -74,6 +62,19 @@ func restoreInit(restore *chainstateRestore) corev1.Container {
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
 	}
+}
+
+// restoreImageUnavailable reports a restore image that cannot be pulled onto the actor's node.
+func restoreImageUnavailable(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name == restoreContainer && status.State.Waiting != nil {
+			switch status.State.Waiting.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // initContainerFailed reports a terminated or crash-looping init container with a non-zero exit.

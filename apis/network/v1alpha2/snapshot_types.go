@@ -6,7 +6,9 @@ import (
 )
 
 // StacksChainstateSnapshot describes one captured chainstate artifact that fresh networks may restore.
-// It records public facts only; private keys stay in the restoring network's own Secrets.
+// It records public facts only; private keys stay in the restoring network's own Secrets. A
+// restoring network copies what it uses into its frozen genesis, so this resource is needed only
+// until the network freezes; its image must stay available while the network exists.
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:subresource:status
@@ -24,8 +26,8 @@ type StacksChainstateSnapshot struct {
 // +kubebuilder:validation:XValidation:rule="self.participants.exists(p, has(p.archive))",message="a snapshot carries at least one actor archive"
 type StacksChainstateSnapshotSpec struct {
 	// Image carries the actor archives under /snapshot and provides a POSIX shell with tar (gzip),
-	// sha256sum, cut and find, as BusyBox does. Every actor start runs it, so it must stay
-	// available while a restored network exists. Restore verifies every archive checksum, so a
+	// sha256sum, cut, cat, find and sync, as BusyBox does. Every actor start runs it, so it must
+	// stay available while a restored network exists. Restore verifies every archive checksum, so a
 	// tag is accepted; a digest reference additionally pins delivery.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512

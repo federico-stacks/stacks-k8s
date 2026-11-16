@@ -16,31 +16,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// restoreFrom pins a snapshot captured at height in the fixture's frozen genesis and moves the
-// modeled node to that restored chain, past the first gate's ceiling.
-func (f *testFixture) restoreFrom(t *testing.T, height int64) *api.StacksChainstateSnapshot {
+// restoreFrom freezes a snapshot captured at height into the fixture's genesis and moves the
+// modeled node to that restored chain, past the first gate's ceiling. No snapshot resource exists:
+// a restored network uses only what its genesis froze.
+func (f *testFixture) restoreFrom(t *testing.T, height int64) {
 	t.Helper()
 	ctx := context.Background()
-	snapshot := &api.StacksChainstateSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "seed", Namespace: "test"},
-		Spec: api.StacksChainstateSnapshotSpec{
-			Image:   "snapshot:test",
-			Bitcoin: api.SnapshotBitcoinTip{Height: height, BlockHash: fmt.Sprintf("%064x", height)},
-		},
-	}
-	if e := f.c.Create(ctx, snapshot); e != nil {
-		t.Fatal(e)
-	}
 	genesis := &api.StacksGenesis{}
 	if e := f.c.Get(ctx, client.ObjectKey{Namespace: "test", Name: "genesis"}, genesis); e != nil {
 		t.Fatal(e)
 	}
 	genesis.Spec.Source.Dependencies = append(genesis.Spec.Source.Dependencies, common.Binding{
 		Kind:        api.KindStacksChainstateSnapshot,
-		Name:        snapshot.Name,
-		UID:         snapshot.UID,
-		Fingerprint: foundation.Digest(snapshot.Spec),
+		Name:        "seed",
+		UID:         "seed-uid",
+		Fingerprint: "sha256:seed",
 	})
+	genesis.Spec.Source.Restored = &api.RestoredChainstate{
+		Image:   "snapshot:test",
+		Bitcoin: api.SnapshotBitcoinTip{Height: height, BlockHash: fmt.Sprintf("%064x", height)},
+	}
 	if e := f.c.Update(ctx, genesis); e != nil {
 		t.Fatal(e)
 	}
@@ -60,7 +55,15 @@ func (f *testFixture) restoreFrom(t *testing.T, height int64) *api.StacksChainst
 		t.Fatal(e)
 	}
 	f.rpc.height = height
-	return snapshot
+}
+
+func (f *testFixture) readRoot(t *testing.T) *api.StacksNetwork {
+	t.Helper()
+	root := &api.StacksNetwork{}
+	if e := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.root), root); e != nil {
+		t.Fatal(e)
+	}
+	return root
 }
 
 func (f *testFixture) generated() int {
@@ -159,39 +162,58 @@ func TestRestoreRequiresOneMatureOutputPerMiner(t *testing.T) {
 	}
 }
 
-// The worker reads the pinned snapshot to authorize the refresh, so its Role must grant exactly
-// that snapshot, and none for a network initialized from genesis.
-func TestWorkerRoleGrantsOnlyThePinnedSnapshot(t *testing.T) {
+// The worker reads the snapshot tip from the frozen genesis, which its Role already covers, so no
+// worker is ever granted the snapshot resource.
+func TestWorkerRoleNeverReadsSnapshots(t *testing.T) {
 	f := baselineFixture(t)
-	genesis := &api.StacksGenesis{ObjectMeta: metav1.ObjectMeta{
+	restored := &api.StacksGenesis{ObjectMeta: metav1.ObjectMeta{
 		Name: f.initial.Spec.Genesis.Name, Namespace: "test", UID: f.initial.Spec.Genesis.UID,
 	}}
-	granted := func() []string {
-		t.Helper()
-		objects, err := workerResources(f.node, f.record, f.initial, "worker:test", 1, nil, genesis)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var names []string
-		for _, rule := range objects[1].(*rbacv1.Role).Rules {
-			if rule.Resources[0] == api.ResourceStacksChainstateSnapshot {
-				if len(rule.ResourceNames) == 0 || len(rule.Verbs) != 1 || rule.Verbs[0] != "get" {
-					t.Fatalf("snapshot grant is not a named get: %+v", rule)
-				}
-				names = append(names, rule.ResourceNames...)
-			}
-		}
-		return names
-	}
-	if names := granted(); len(names) != 0 {
-		t.Fatalf("a network from genesis must not read snapshots: %v", names)
-	}
-	genesis.Spec.Source.Dependencies = []common.Binding{
-		{Kind: api.KindStacksEpochSchedule, Name: "epochs"},
+	restored.Spec.Source.Restored = &api.RestoredChainstate{Image: "snapshot:test"}
+	restored.Spec.Source.Dependencies = []common.Binding{
 		{Kind: api.KindStacksChainstateSnapshot, Name: "seed", UID: "seed-uid"},
 	}
-	if names := granted(); len(names) != 1 || names[0] != "seed" {
-		t.Fatalf("restored worker must read exactly the pinned snapshot: %v", names)
+	objects, err := workerResources(f.node, f.record, f.initial, "worker:test", 1, nil, restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesisGranted := false
+	for _, rule := range objects[1].(*rbacv1.Role).Rules {
+		for _, resource := range rule.Resources {
+			if resource == api.ResourceStacksChainstateSnapshot {
+				t.Fatalf("worker granted snapshots: %+v", rule)
+			}
+			genesisGranted = genesisGranted || resource == api.ResourceStacksGenesis &&
+				len(rule.ResourceNames) == 1 && rule.ResourceNames[0] == restored.Name
+		}
+	}
+	if !genesisGranted {
+		t.Fatal("worker cannot read its frozen genesis")
+	}
+}
+
+// A restored network must never fall back to bootstrap generation, even when its genesis cannot be
+// read: the scheduler holds without an offer, and the gate authority refuses a restored genesis.
+func TestRestoreFailsClosedWithoutItsFrozenGenesis(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.worker.Now = func() time.Time { return f.now }
+	f.restoreFrom(t, 217)
+	if _, e := currentGate(ctx, f.c, f.readRoot(t), f.readInitial(t)); e == nil {
+		t.Fatal("bootstrap gate authority granted on a restored genesis")
+	}
+	root := f.readRoot(t)
+	root.Status.GenesisRef.Fingerprint = "sha256:changed"
+	if e := f.c.Status().Update(ctx, root); e != nil {
+		t.Fatal(e)
+	}
+	s := f.schedulerFor()
+	f.reconcile(t, s)
+	initial := f.readInitial(t)
+	if initial.Status.Offer != nil || initial.Status.PreparedAt != nil ||
+		initial.Status.Phase != bitcoin.InitializationHeld || initial.Status.Reason != reasonFrozenGenesisUnavailable ||
+		f.generated() != 0 {
+		t.Fatalf("unexpected status without the frozen genesis: %+v", initial.Status)
 	}
 }
 
@@ -199,11 +221,6 @@ func TestRestoreRefusesAnUnexpectedChain(t *testing.T) {
 	for name, mutate := range map[string]func(*testFixture){
 		"other tip":    func(f *testFixture) { f.rpc.tip = strings.Repeat("f", 64) },
 		"lower height": func(f *testFixture) { f.rpc.height = 216 },
-		"snapshot deleted": func(f *testFixture) {
-			_ = f.c.Delete(context.Background(), &api.StacksChainstateSnapshot{
-				ObjectMeta: metav1.ObjectMeta{Name: "seed", Namespace: "test"},
-			})
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -218,12 +235,9 @@ func TestRestoreRefusesAnUnexpectedChain(t *testing.T) {
 			f.reconcile(t, s)
 			f.reconcile(t, s)
 			initial := f.readInitial(t)
-			want := reasonRestoredChainDiffers
-			if name == "snapshot deleted" {
-				want = reasonRestoreSnapshotUnavailable
-			}
 			if initial.Status.Offer != nil || initial.Status.PreparedAt != nil ||
-				initial.Status.Phase != bitcoin.InitializationBlocked || initial.Status.Reason != want {
+				initial.Status.Phase != bitcoin.InitializationBlocked ||
+				initial.Status.Reason != reasonRestoredChainDiffers {
 				t.Fatalf("unexpected restore status %+v", initial.Status)
 			}
 			if f.generated() != 0 {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -366,9 +367,31 @@ func verifyChainstateRestore(
 	if !pinned {
 		t.Fatalf("frozen genesis does not pin its snapshot: %+v", genesis.Spec.Source.Dependencies)
 	}
+	frozenRestore := genesis.Spec.Source.Restored
+	if frozenRestore == nil || frozenRestore.Image != snapshot.Spec.Image ||
+		frozenRestore.Bitcoin != snapshot.Spec.Bitcoin {
+		t.Fatalf("frozen genesis does not carry the snapshot facts: %+v", frozenRestore)
+	}
 	if policy := restored.Spec.Genesis.Restore.StacksImagePolicy; policy != api.StacksImagePolicyExact ||
-		genesis.Spec.Source.RestoredImageChanges != nil {
-		t.Fatalf("default policy %q recorded image changes %+v", policy, genesis.Spec.Source.RestoredImageChanges)
+		frozenRestore.ImageChanges != nil {
+		t.Fatalf("default policy %q recorded image changes %+v", policy, frozenRestore.ImageChanges)
+	}
+	// Every snapshot archive is frozen on exactly its actor's requirement, so the restored network
+	// never reads the snapshot resource again.
+	want := map[api.SnapshotArchive]bool{}
+	for _, p := range snapshot.Spec.Participants {
+		if p.Archive != nil {
+			want[*p.Archive] = true
+		}
+	}
+	got := map[api.SnapshotArchive]bool{}
+	for _, required := range genesis.Spec.Bootstrap.Requirements {
+		if required.RestoredArchive != nil {
+			got[*required.RestoredArchive] = true
+		}
+	}
+	if len(want) == 0 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("frozen archives %+v, want %+v", got, want)
 	}
 
 	// A snapshot written by another Stacks build restores only when the network allows it, and the
@@ -427,7 +450,10 @@ func verifyStacksImagePolicy(
 	); err != nil {
 		t.Fatal(err)
 	}
-	if got := genesis.Spec.Source.RestoredImageChanges; len(got) != 1 || got[0] != change {
+	if genesis.Spec.Source.Restored == nil {
+		t.Fatal("frozen genesis does not carry the restore facts")
+	}
+	if got := genesis.Spec.Source.Restored.ImageChanges; len(got) != 1 || got[0] != change {
 		t.Fatalf("recorded image changes %+v, want %+v", got, change)
 	}
 	if restored.Status.GenesisDigest != frozen.Status.GenesisDigest {

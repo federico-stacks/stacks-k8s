@@ -198,6 +198,7 @@ func TestPoX4PublicInputsRequireCurrentAndCapturedIdentities(t *testing.T) {
 					UID:         "seed",
 					Fingerprint: "snapshot-digest",
 				})
+				genesis.Spec.Source.Restored = &api.RestoredChainstate{Image: "snapshot:test"}
 				root.Status.GenesisRef.Fingerprint = foundation.Digest(genesis.Spec)
 			case "late-removed":
 				root.Status.Identities[0].Removing = true

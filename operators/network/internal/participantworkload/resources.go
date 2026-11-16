@@ -396,7 +396,10 @@ func actorWorkload(
 	}
 	if restore != nil {
 		pod := &workload.Spec.Template.Spec
-		pod.InitContainers = append([]corev1.Container{restoreInit(restore)}, pod.InitContainers...)
+		pod.InitContainers = append(
+			[]corev1.Container{restoreInit(restore, *pod.Containers[0].Resources.DeepCopy())},
+			pod.InitContainers...,
+		)
 	}
 	return workload, nil
 }
