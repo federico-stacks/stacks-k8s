@@ -11,6 +11,7 @@ import (
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -116,6 +117,81 @@ func TestRestoreRefreshesTheTipOnceThenPrepares(t *testing.T) {
 	}
 	if f.generated() != 1 {
 		t.Fatal("restore generated more than the single refresh block")
+	}
+}
+
+// A restored miner has usually spent part of its bootstrap funding on block commits, so the restore
+// needs only the mature output the miner start gate requires, not MatureOutputsPerMiner.
+func TestRestoreRequiresOneMatureOutputPerMiner(t *testing.T) {
+	// The fixture's wallet has one mature coinbase output from height 101.
+	for name, height := range map[string]int64{
+		"bootstrap funding partly spent": 217,
+		"no mature output":               100,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t)
+			f.worker.Now = func() time.Time { return f.now }
+			f.restoreFrom(t, height)
+			initial := f.readInitial(t)
+			initial.Spec.MatureOutputsPerMiner = 2
+			if e := f.c.Update(ctx, initial); e != nil {
+				t.Fatal(e)
+			}
+			if e := f.worker.Step(ctx); e != nil {
+				t.Fatal(e)
+			}
+			s := f.schedulerFor()
+			f.reconcile(t, s)
+			f.reconcile(t, s)
+			initial = f.readInitial(t)
+			if height >= 101 {
+				if offer := initial.Status.Offer; offer == nil || offer.Mode != bitcoin.OfferRestore {
+					t.Fatalf("restore must offer the refresh with one mature output: %+v", initial.Status)
+				}
+				return
+			}
+			if initial.Status.Offer != nil || initial.Status.Phase != bitcoin.InitializationBlocked ||
+				initial.Status.Reason != reasonRestoredWalletsImmature || f.generated() != 0 {
+				t.Fatalf("restore must block without a mature miner output: %+v", initial.Status)
+			}
+		})
+	}
+}
+
+// The worker reads the pinned snapshot to authorize the refresh, so its Role must grant exactly
+// that snapshot, and none for a network initialized from genesis.
+func TestWorkerRoleGrantsOnlyThePinnedSnapshot(t *testing.T) {
+	f := baselineFixture(t)
+	genesis := &api.StacksGenesis{ObjectMeta: metav1.ObjectMeta{
+		Name: f.initial.Spec.Genesis.Name, Namespace: "test", UID: f.initial.Spec.Genesis.UID,
+	}}
+	granted := func() []string {
+		t.Helper()
+		objects, err := workerResources(f.node, f.record, f.initial, "worker:test", 1, nil, genesis)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, rule := range objects[1].(*rbacv1.Role).Rules {
+			if rule.Resources[0] == api.ResourceStacksChainstateSnapshot {
+				if len(rule.ResourceNames) == 0 || len(rule.Verbs) != 1 || rule.Verbs[0] != "get" {
+					t.Fatalf("snapshot grant is not a named get: %+v", rule)
+				}
+				names = append(names, rule.ResourceNames...)
+			}
+		}
+		return names
+	}
+	if names := granted(); len(names) != 0 {
+		t.Fatalf("a network from genesis must not read snapshots: %v", names)
+	}
+	genesis.Spec.Source.Dependencies = []common.Binding{
+		{Kind: api.KindStacksEpochSchedule, Name: "epochs"},
+		{Kind: api.KindStacksChainstateSnapshot, Name: "seed", UID: "seed-uid"},
+	}
+	if names := granted(); len(names) != 1 || names[0] != "seed" {
+		t.Fatalf("restored worker must read exactly the pinned snapshot: %v", names)
 	}
 }
 

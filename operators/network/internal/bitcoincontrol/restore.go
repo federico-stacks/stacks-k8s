@@ -41,7 +41,7 @@ func restoredSnapshot(
 
 // reconcileRestore prepares Bitcoin for a network restored from a chainstate snapshot. Instead of
 // generating up to the first gate, it proves the restored chain (the snapshot's exact height and
-// tip, ready wallets and mature miner outputs), then generates exactly one block: stacks-node
+// tip, ready wallets and a mature output per miner), then generates exactly one block: stacks-node
 // refuses a burnchain tip older than two hours, and a snapshot is usually older. Only then does it
 // record preparation, which lets the Stacks actors start on a fresh tip.
 func (s *Scheduler) reconcileRestore(
@@ -76,7 +76,7 @@ func (s *Scheduler) reconcileRestore(
 	if reason != "" {
 		return report(phase, reason)
 	}
-	if !minersMature(record, view.mature) {
+	if !restoredMinersFunded(record, view.mature) {
 		return report(bitcoin.InitializationBlocked, reasonRestoredWalletsImmature)
 	}
 	restored := snapshot.Spec.Bitcoin

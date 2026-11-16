@@ -326,6 +326,9 @@ func workerResourcesWithActions(
 	}
 	rule(api.GroupVersion.Group, api.ResourceStacksNetwork, []string{"network"}, "get")
 	participants := []string{p.Name, productionBinding(init).Name}
+	// snapshots is the chainstate snapshot a restored genesis pins: the worker proves the restore
+	// refresh extends its tip.
+	snapshots := []string{}
 	if len(genesis) > 1 {
 		return nil, fmt.Errorf("multiple frozen worker cohorts")
 	}
@@ -339,9 +342,15 @@ func workerResourcesWithActions(
 			}
 			participants = append(participants, required.Participant.Name)
 		}
+		for _, dependency := range genesis[0].Spec.Source.Dependencies {
+			if dependency.Kind == api.KindStacksChainstateSnapshot {
+				snapshots = append(snapshots, dependency.Name)
+			}
+		}
 	}
 	rule(api.GroupVersion.Group, api.ResourceStacksNetworkParticipant, participants, "get")
 	rule(api.GroupVersion.Group, api.ResourceStacksGenesis, []string{init.Spec.Genesis.Name}, "get")
+	rule(api.GroupVersion.Group, api.ResourceStacksChainstateSnapshot, snapshots, "get")
 	rule(bitcoin.GroupVersion.Group, bitcoin.ResourceBitcoinExecution, []string{record.Name}, "get")
 	rule(bitcoin.GroupVersion.Group, bitcoin.ResourceBitcoinExecution+"/status", []string{record.Name}, "update")
 	rule(bitcoin.GroupVersion.Group, bitcoin.ResourceBitcoinInitialization, []string{init.Name}, "get")

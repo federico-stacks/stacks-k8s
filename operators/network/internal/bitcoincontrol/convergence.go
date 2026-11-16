@@ -147,10 +147,16 @@ func (s *Scheduler) converge(
 	return view, "", ""
 }
 
-// minersMature reports whether every frozen miner wallet has its required mature outputs.
-func minersMature(record *bitcoin.BitcoinInitialization, mature map[string]int32) bool {
+// restoredMinerOutputs is the mature coinbase outputs a restored miner wallet needs: what the miner
+// start gate requires. MatureOutputsPerMiner is the funding target of a bootstrap from genesis; a
+// restored chain has usually spent part of it on block commits already.
+const restoredMinerOutputs = 1
+
+// restoredMinersFunded reports whether every frozen miner wallet can start mining on the restored
+// chain.
+func restoredMinersFunded(record *bitcoin.BitcoinInitialization, mature map[string]int32) bool {
 	for _, wallet := range record.Spec.MinerWallets {
-		if mature[string(wallet.Wallet.UID)] < record.Spec.MatureOutputsPerMiner {
+		if mature[string(wallet.Wallet.UID)] < restoredMinerOutputs {
 			return false
 		}
 	}
