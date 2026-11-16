@@ -71,8 +71,9 @@ func (s *Scheduler) reconcileRestore(
 	if reason != "" {
 		return report(bitcoin.InitializationBlocked, reason)
 	}
+	restored := chainstate.Bitcoin
 	if target := allRecords[string(record.Spec.Target.UID)]; target != nil {
-		accountRestoreReceipt(root, record, target)
+		accountRestoreReceipt(root, record, target, restored)
 	}
 	view, phase, reason := s.converge(ctx, root, record, allRecords)
 	if reason != "" {
@@ -81,13 +82,14 @@ func (s *Scheduler) reconcileRestore(
 	if !restoredMinersFunded(record, view.mature) {
 		return report(bitcoin.InitializationBlocked, reasonRestoredWalletsImmature)
 	}
-	restored := chainstate.Bitcoin
-	offer := record.Status.Offer
-	if offer != nil && offer.Mode == bitcoin.OfferRestore && offer.Number <= record.Status.LastAccountedOffer {
+	// Before preparation only the refresh receipt is ever accounted, so an accounted offer means the
+	// refresh block landed, whichever offer is current: an override change or a re-issued offer
+	// cleared or replaced since then must not hide it.
+	if record.Status.LastAccountedOffer > 0 {
 		if view.height == restored.Height && view.tip == restored.BlockHash {
 			return report(bitcoin.InitializationWaiting, reasonAwaitingPostReceiptObservation)
 		}
-		if view.height != restored.Height+1 {
+		if view.height != restored.Height+1 || !refreshAtTip(view, record) {
 			return report(bitcoin.InitializationBlocked, reasonRestoredChainDiffers)
 		}
 		now := metav1.NewTime(s.Now().UTC())
@@ -95,11 +97,14 @@ func (s *Scheduler) reconcileRestore(
 		if record.Status.FirstCeilingObservedAt == nil {
 			record.Status.FirstCeilingObservedAt = &now
 		}
+		// Withdraw any re-issued refresh: the worker must not generate on the refreshed tip.
+		record.Status.Offer = nil
 		return report(bitcoin.InitializationHeld, reasonRestorePrepared)
 	}
 	if view.height != restored.Height || view.tip != restored.BlockHash {
 		return report(bitcoin.InitializationBlocked, reasonRestoredChainDiffers)
 	}
+	offer := record.Status.Offer
 	if offer != nil && offer.Mode == bitcoin.OfferRestore && offer.Number > record.Status.LastAccountedOffer &&
 		s.Now().Before(offer.ExpiresAt.Time) && offer.Production == current &&
 		offer.PolicyDigest == production.Status.Admission.PolicyDigest {
@@ -109,7 +114,10 @@ func (s *Scheduler) reconcileRestore(
 				return ctrl.Result{}, e
 			}
 		}
-		return report(bitcoin.InitializationPreparing, reasonOpportunityOutstanding)
+		return report(
+			bitcoin.InitializationPreparing,
+			refreshReason(record, offer.Number, reasonOpportunityOutstanding),
+		)
 	}
 	if e := foundation.ValidateAdmissionEligibility(ctx, s.Reader, production); e != nil {
 		record.Status.Offer = nil
@@ -127,7 +135,9 @@ func (s *Scheduler) reconcileRestore(
 	}
 	payout := record.Spec.PayoutWallet
 	record.Status.Offer = &bitcoin.BitcoinBlockOffer{
-		Mode:           bitcoin.OfferRestore,
+		Mode: bitcoin.OfferRestore,
+		// An active schedule override must authorize the refresh, as it does every offer.
+		Override:       overrideBinding(record),
 		Initialization: objectref.BitcoinInitialization(record),
 		Production:     current,
 		PolicyDigest:   production.Status.Admission.PolicyDigest,
@@ -139,21 +149,62 @@ func (s *Scheduler) reconcileRestore(
 		Ceiling:        restored.Height + 1,
 		ExpiresAt:      metav1.NewTime(s.Now().Add(bootstrapAdmissionWindow).UTC()),
 	}
-	result, e := report(bitcoin.InitializationPreparing, reasonOpportunitySelected)
+	result, e := report(bitcoin.InitializationPreparing, refreshReason(record, number+1, reasonOpportunitySelected))
 	result.RequeueAfter = time.Millisecond
 	return result, e
 }
 
-// accountRestoreReceipt advances the scheduler cursor once the worker reports the refresh block.
-// The refresh pays the payout wallet, so no miner funding is counted.
+// unansweredRefreshes is how many refresh offers may expire without a receipt before the scheduler
+// reports that the worker is not acknowledging them. The worker refuses silently; this surfaces it.
+const unansweredRefreshes = 2
+
+// refreshReason reports the restore refresh as unacknowledged once offer number has outlived
+// unansweredRefreshes earlier offers without an accounted receipt.
+func refreshReason(record *bitcoin.BitcoinInitialization, number int64, reason string) string {
+	if number-record.Status.LastAccountedOffer > unansweredRefreshes {
+		return reasonRestoreRefreshUnacknowledged
+	}
+	return reason
+}
+
+// refreshAtTip checks that the node's tip is the accounted refresh block while the target still
+// retains that receipt. A later operation's receipt leaves only the height to prove it.
+func refreshAtTip(view convergence, record *bitcoin.BitcoinInitialization) bool {
+	receipt := view.target.Status.LastReceipt
+	if receipt == nil || receipt.Request.Offer == nil || receipt.Request.Offer.Mode != bitcoin.OfferRestore ||
+		receipt.Request.Offer.Number != record.Status.LastAccountedOffer {
+		return true
+	}
+	return receipt.BlockHash == view.tip
+}
+
+// restoredMinerOutputs is the mature coinbase outputs a restored miner wallet needs: what the miner
+// start gate requires. MatureOutputsPerMiner is the funding target of a bootstrap from genesis; a
+// restored chain has usually spent part of it on block commits already.
+const restoredMinerOutputs = 1
+
+// restoredMinersFunded reports whether every frozen miner wallet can start mining on the restored
+// chain.
+func restoredMinersFunded(record *bitcoin.BitcoinInitialization, mature map[string]int32) bool {
+	for _, wallet := range record.Spec.MinerWallets {
+		if mature[string(wallet.Wallet.UID)] < restoredMinerOutputs {
+			return false
+		}
+	}
+	return true
+}
+
+// accountRestoreReceipt advances the scheduler cursor once the worker reports the refresh block on
+// the frozen snapshot tip. The refresh pays the payout wallet, so no miner funding is counted.
 func accountRestoreReceipt(
 	root *api.StacksNetwork,
 	initial *bitcoin.BitcoinInitialization,
 	execution *bitcoin.BitcoinExecution,
-) bool {
+	restored api.SnapshotBitcoinTip,
+) {
 	if execution.Spec.NetworkUID != root.UID || !metav1.IsControlledBy(execution, root) ||
 		execution.Spec.Participant != initial.Spec.Target {
-		return false
+		return
 	}
 	receipt := execution.Status.LastReceipt
 	if receipt == nil || receipt.Request.Method != bitcoin.RPCGenerate || receipt.Request.Action != nil ||
@@ -161,7 +212,7 @@ func accountRestoreReceipt(
 		receipt.Request.Reservation != objectref.BitcoinInitialization(initial) ||
 		receipt.Request.Target.Participant != initial.Spec.Target ||
 		!hashValid(receipt.BlockHash) {
-		return false
+		return
 	}
 	offer := receipt.Request.Offer
 	if offer.Mode != bitcoin.OfferRestore || offer.Initialization != objectref.BitcoinInitialization(initial) ||
@@ -169,12 +220,13 @@ func accountRestoreReceipt(
 		offer.Number != execution.Status.CompletedOffer ||
 		offerBlocks(offer) != 1 ||
 		offer.Ceiling != offer.ExpectedHeight+1 ||
+		offer.ExpectedHeight != restored.Height ||
+		offer.ExpectedTip != restored.BlockHash ||
 		offer.Wallet != initial.Spec.PayoutWallet.Wallet ||
 		offer.Address != initial.Spec.PayoutWallet.Address {
-		return false
+		return
 	}
 	initial.Status.LastAccountedOffer = offer.Number
-	return true
 }
 
 // authorizeRestoreOffer permits only the single refresh block, to the payout wallet, on top of the

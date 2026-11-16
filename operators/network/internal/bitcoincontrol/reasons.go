@@ -97,6 +97,8 @@ const (
 	reasonReplacementWorkInsufficient = "ReplacementWorkInsufficient"
 	// reasonRestorePrepared reports RestorePrepared.
 	reasonRestorePrepared = "RestorePrepared"
+	// reasonRestoreRefreshUnacknowledged reports RestoreRefreshUnacknowledged.
+	reasonRestoreRefreshUnacknowledged = "RestoreRefreshUnacknowledged"
 	// reasonRestoredChainDiffers reports RestoredChainDiffers.
 	reasonRestoredChainDiffers = "RestoredChainDiffers"
 	// reasonRestoredWalletsImmature reports RestoredWalletsImmature.

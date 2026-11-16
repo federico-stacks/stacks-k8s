@@ -3,6 +3,7 @@ package bitcoincontrol
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
+	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/objectref"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -120,6 +122,131 @@ func TestRestoreRefreshesTheTipOnceThenPrepares(t *testing.T) {
 	}
 	if f.generated() != 1 {
 		t.Fatal("restore generated more than the single refresh block")
+	}
+}
+
+// refreshLanded drives a restore until the worker has generated the refresh block, before the
+// scheduler accounts its receipt, and returns the offer it generated.
+func (f *testFixture) refreshLanded(t *testing.T, s *Scheduler) *bitcoin.BitcoinBlockOffer {
+	t.Helper()
+	ctx := context.Background()
+	if e := f.worker.Step(ctx); e != nil {
+		t.Fatal(e)
+	}
+	f.reconcile(t, s)
+	f.reconcile(t, s)
+	offer := f.readRecord(t).Spec.Offer
+	if offer == nil || offer.Mode != bitcoin.OfferRestore {
+		t.Fatalf("no restore refresh offered: %+v", f.readInitial(t).Status)
+	}
+	if e := f.worker.Step(ctx); e != nil {
+		t.Fatal(e)
+	}
+	eventually(t, func() bool { return f.readRecord(t).Status.CompletedOffer == offer.Number })
+	if e := f.worker.Step(ctx); e != nil {
+		t.Fatal(e)
+	}
+	return offer
+}
+
+// Before preparation, only the refresh receipt is ever accounted: an override change that
+// withdraws the current offer, or an offer re-issued while the refresh was in flight, must not
+// hide the landed refresh and leave the restore blocked at height H+1.
+func TestRestorePreparesWhicheverRefreshOfferIsCurrent(t *testing.T) {
+	for name, mutate := range map[string]func(offer *bitcoin.BitcoinBlockOffer) *bitcoin.BitcoinBlockOffer{
+		"offer withdrawn": func(*bitcoin.BitcoinBlockOffer) *bitcoin.BitcoinBlockOffer { return nil },
+		"offer re-issued": func(offer *bitcoin.BitcoinBlockOffer) *bitcoin.BitcoinBlockOffer {
+			next := offer.DeepCopy()
+			next.Number++
+			return next
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t)
+			f.worker.Now = func() time.Time { return f.now }
+			f.restoreFrom(t, 217)
+			s := f.schedulerFor()
+			offer := f.refreshLanded(t, s)
+			initial := f.readInitial(t)
+			initial.Status.Offer = mutate(offer)
+			if e := f.c.Status().Update(ctx, initial); e != nil {
+				t.Fatal(e)
+			}
+			f.now = f.now.Add(time.Second)
+			f.reconcile(t, s)
+			initial = f.readInitial(t)
+			if initial.Status.PreparedAt == nil || initial.Status.Reason != reasonRestorePrepared ||
+				initial.Status.Offer != nil || initial.Status.LastAccountedOffer != offer.Number {
+				t.Fatalf("landed refresh not recognized: %+v", initial.Status)
+			}
+			_ = f.worker.Step(ctx)
+			if f.generated() != 1 {
+				t.Fatalf("generated %d blocks, want only the refresh", f.generated())
+			}
+		})
+	}
+}
+
+// The worker refuses an unauthorized offer silently; the scheduler surfaces repeated unanswered
+// refreshes instead of reporting an outstanding opportunity forever.
+func TestRestoreReportsAnUnacknowledgedRefresh(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.worker.Now = func() time.Time { return f.now }
+	f.restoreFrom(t, 217)
+	if e := f.worker.Step(ctx); e != nil {
+		t.Fatal(e)
+	}
+	s := f.schedulerFor()
+	// One observation stays usable while the worker, standing still, never answers.
+	s.Freshness = time.Hour
+	var reasons []string
+	for range 3 {
+		f.reconcile(t, s)
+		reasons = append(reasons, f.readInitial(t).Status.Reason)
+		f.now = f.now.Add(bootstrapAdmissionWindow + time.Second)
+	}
+	want := []string{reasonOpportunitySelected, reasonOpportunitySelected, reasonRestoreRefreshUnacknowledged}
+	if !reflect.DeepEqual(reasons, want) {
+		t.Fatalf("reasons %v, want %v", reasons, want)
+	}
+	if f.generated() != 0 {
+		t.Fatal("a silent worker generated")
+	}
+}
+
+// An active schedule override authorizes every offer, the restore refresh included: without its
+// binding the worker would refuse the refresh until the override ends.
+func TestRestoreRefreshCarriesAnActiveOverride(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	f.worker.Now = func() time.Time { return f.now }
+	f.restoreFrom(t, 217)
+	request := newOverride(f, "fast", "10s", "10m")
+	request.Finalizers = []string{OverrideFinalizer}
+	if e := f.c.Create(ctx, request); e != nil {
+		t.Fatal(e)
+	}
+	active := &bitcoin.BitcoinActiveOverride{
+		Override:   objectref.BitcoinScheduleOverride(request),
+		Production: objectref.Participant(f.production),
+		Schedule:   *request.Spec.Schedule,
+		StartedAt:  metav1.NewTime(f.now),
+		ExpiresAt:  metav1.NewTime(f.now.Add(10 * time.Minute)),
+	}
+	request.Status.Admission = active.DeepCopy()
+	if e := f.c.Update(ctx, request); e != nil {
+		t.Fatal(e)
+	}
+	initial := f.readInitial(t)
+	initial.Status.Override = active
+	if e := f.c.Status().Update(ctx, initial); e != nil {
+		t.Fatal(e)
+	}
+	offer := f.refreshLanded(t, f.schedulerFor())
+	if offer.Override == nil || *offer.Override != active.Override || f.generated() != 1 {
+		t.Fatalf("refresh under an override: offer %+v, generated %d", offer, f.generated())
 	}
 }
 
@@ -247,13 +374,44 @@ func TestRestoreRefusesAnUnexpectedChain(t *testing.T) {
 	}
 }
 
+// Each refused case passes the live-chain preflight and is refused by the exact rule its expected
+// error names, so removing that rule fails the case even though another check would still stop it.
 func TestWorkerRefusesRestoreOffersBeyondTheSnapshot(t *testing.T) {
-	for name, mutate := range map[string]func(*bitcoin.BitcoinBlockOffer){
+	const (
+		shared       = "generation opportunity is not currently authorized"
+		unauthorized = "restore refresh is not authorized"
+		offSnapshot  = "restore refresh does not extend the snapshot tip"
+	)
+	type offerCase struct {
+		mutate  func(*testFixture, *bitcoin.BitcoinInitialization, *bitcoin.BitcoinBlockOffer)
+		refusal string
+	}
+	for name, tc := range map[string]offerCase{
 		// The control case proves this path generates when the offer is exactly the refresh.
-		"valid":        func(*bitcoin.BitcoinBlockOffer) {},
-		"two blocks":   func(o *bitcoin.BitcoinBlockOffer) { o.Count, o.Ceiling = 2, 219 },
-		"other height": func(o *bitcoin.BitcoinBlockOffer) { o.ExpectedHeight, o.Ceiling = 216, 217 },
-		"other wallet": func(o *bitcoin.BitcoinBlockOffer) { o.Address = "other" },
+		"valid": {func(*testFixture, *bitcoin.BitcoinInitialization, *bitcoin.BitcoinBlockOffer) {}, ""},
+		"two blocks": {func(_ *testFixture, _ *bitcoin.BitcoinInitialization, o *bitcoin.BitcoinBlockOffer) {
+			o.Count, o.Ceiling = 2, 219
+		}, shared},
+		// The shared count check allows one block under a wider ceiling; the refresh is exactly H+1.
+		"wider ceiling": {func(_ *testFixture, _ *bitcoin.BitcoinInitialization, o *bitcoin.BitcoinBlockOffer) {
+			o.Ceiling = 219
+		}, unauthorized},
+		// The live chain matches the offer at another height than the snapshot's.
+		"other height": {func(_ *testFixture, _ *bitcoin.BitcoinInitialization, o *bitcoin.BitcoinBlockOffer) {
+			o.ExpectedHeight, o.Ceiling, o.ExpectedTip = 216, 217, fmt.Sprintf("%064x", 216)
+		}, offSnapshot},
+		// The live chain matches the offer at the snapshot's height, on another tip.
+		"off the snapshot tip": {func(f *testFixture, _ *bitcoin.BitcoinInitialization, o *bitcoin.BitcoinBlockOffer) {
+			f.rpc.tip = strings.Repeat("f", 64)
+			o.ExpectedTip = f.rpc.tip
+		}, offSnapshot},
+		"other wallet": {func(_ *testFixture, _ *bitcoin.BitcoinInitialization, o *bitcoin.BitcoinBlockOffer) {
+			o.Address = "other"
+		}, unauthorized},
+		"after preparation": {func(f *testFixture, initial *bitcoin.BitcoinInitialization, _ *bitcoin.BitcoinBlockOffer) {
+			prepared := metav1.NewTime(f.now)
+			initial.Status.PreparedAt = &prepared
+		}, unauthorized},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -264,7 +422,7 @@ func TestWorkerRefusesRestoreOffersBeyondTheSnapshot(t *testing.T) {
 			initial := f.readInitial(t)
 			offer := initial.Status.Offer
 			offer.Mode, offer.Ceiling = bitcoin.OfferRestore, 218
-			mutate(offer)
+			tc.mutate(f, initial, offer)
 			if e := f.c.Status().Update(ctx, initial); e != nil {
 				t.Fatal(e)
 			}
@@ -274,10 +432,14 @@ func TestWorkerRefusesRestoreOffersBeyondTheSnapshot(t *testing.T) {
 				t.Fatal(e)
 			}
 			f.rpc.height = offer.ExpectedHeight
-			_ = f.worker.Step(ctx)
-			_ = f.worker.Step(ctx)
+			for range 2 {
+				err := f.worker.Step(ctx)
+				if tc.refusal == "" && err != nil || tc.refusal != "" && (err == nil || err.Error() != tc.refusal) {
+					t.Fatalf("worker step: %v, want refusal %q", err, tc.refusal)
+				}
+			}
 			want := 0
-			if name == "valid" {
+			if tc.refusal == "" {
 				want = 1
 			}
 			if got := f.generated(); got != want {
