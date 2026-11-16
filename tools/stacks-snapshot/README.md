@@ -8,7 +8,9 @@ image that carries the archives. A network that sets
 instead of initializing from genesis.
 
 Capture **stops the source network**. `Stopped` is terminal, so capture a network you
-no longer need running.
+no longer need running. If the export fails after the stop, rerun the same request
+with `"resume": true` and an empty output directory: it exports again from the tips
+the first run recorded.
 
 ```bash
 GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.json
@@ -30,15 +32,16 @@ GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.jso
 ```
 
 | Field | Meaning |
-|---|---|
+| --- | --- |
 | `kubeconfig`, `context` | Cluster selection. Static certificate or token credentials only; exec and auth-provider plugins are rejected. |
 | `namespace`, `network`, `networkUID` | The source network. The UID guards against acting on a recreated network with the same name. |
 | `snapshot` | Name of the `StacksChainstateSnapshot` the manifest declares. |
 | `image` | Reference of the snapshot image that will hold the archives under `/snapshot`; recorded as `spec.image`. Capture does not build or push it. |
-| `exportImage` | Optional. BusyBox-compatible image: it runs the export Pod and is the snapshot image's base, so it must provide `sh`, `sleep`, `tar` with gzip, `sha256sum`, `cut` and `find`. Defaults to BusyBox pinned by digest. |
-| `output` | Absolute path of a new or empty directory for the archives, `snapshot.yaml` and `Dockerfile`. |
-| `bitcoinHeight` | Optional. Pause once every Bitcoin node reports at least this height. |
+| `exportImage` | Optional. BusyBox-compatible image: it runs the export Pod and is the snapshot image's base, so it must provide `sh`, `sleep`, `tar` with gzip, `sha256sum`, `cut`, `cat`, `find` and `sync`. Defaults to BusyBox pinned by digest. |
+| `output` | Absolute path of a new or empty directory for the archives, `snapshot.yaml` and `Dockerfile`. It is created only after the network identity is confirmed. |
+| `bitcoinHeight` | Optional. Pause once every Bitcoin node reports at least this height. Not allowed with `resume`. |
 | `timeoutSeconds` | Bound for the whole capture, 60 to 86400. |
+| `resume` | Optional. Export a network an earlier capture already stopped, from the tips it recorded on the network. |
 
 ## What capture does
 
@@ -50,19 +53,32 @@ GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.jso
 3. Waits until the chain is still: every Bitcoin execution and Stacks node observation
    is refreshed twice in a row with the same tips, and the nodes of each chain agree.
    It records the Bitcoin and Stacks tips from these status observations.
-4. Sets `spec.operation: Stopped` and waits for phase `Stopped`. Actor volumes stay.
+4. Sets `spec.operation: Stopped` and waits for phase `Stopped`. The same patch records
+   the tips in the network's `snapshot.stacks.org/capture` annotation, for a resume.
+   Actor volumes stay.
 5. For each actor volume, creates a Pod that mounts it read-only and streams `tar` out
-   of it over `exec`. Locally, it drops the root entry and the peer and mempool
-   databases, gzips the stream and computes its sha256.
+   of it over `exec`. Locally, it gzips the stream, computes its sha256 and drops:
+   - the root entry;
+   - the peer and mempool databases, which hold the source network's peers (and the
+     node's p2p key) and pending transactions;
+   - the restore marker of a network that was itself restored.
+
+   It refuses links, devices and members outside the data root, and a stream that ends
+   without tar's end-of-archive marker. A failed tar ends the stream at once with its
+   error; a partial archive is deleted.
 6. Writes `snapshot.yaml` and `Dockerfile`, and prints a report with the tips, archive
    checksums and step times. None of them contains keys.
+
+With `resume`, capture requires a `Stopped` network carrying the recorded tips, skips
+steps 2 to 4, and exports into the new output directory. A failure before the stop
+leaves the network `Paused`; set it back to `Running` to keep using it.
 
 Only the initial cohort is captured. Participants that joined later are not part of the
 snapshot; add them to the restored network after it initializes.
 
 The export Pod runs as the actor user (1000) without privileges, a service account
 token or a writable root filesystem. It expires on its own after `timeoutSeconds`, and
-a later capture of the same network deletes leftovers.
+a resumed export deletes the ones an interrupted run left behind.
 
 ## Build, load and restore
 
@@ -89,9 +105,10 @@ spec:
       stacksImagePolicy: Exact   # AllowDifferent runs other Stacks node and signer images
 ```
 
-Keep the resource and the image available while a restored network exists: its actor
-workloads require the resource, and every actor Pod starts with the image's restore step
-(a no-op once its volume holds the data).
+The network copies what it uses from the resource into its frozen genesis, so the
+resource is needed only until the network freezes. Keep the image available while a
+restored network exists: every actor Pod starts with the image's restore step (a no-op
+once its volume holds the data).
 
 ## Permissions
 
@@ -128,4 +145,6 @@ rules:
 ```
 
 No Secret, Node or PersistentVolume access is needed: the scheduler places the export
-Pod on its volume's node.
+Pod on its volume's node. Both verbs on `pods/exec` are listed because clusters differ
+in how they authorize the exec stream: some check `get` for the WebSocket upgrade,
+others `create`.

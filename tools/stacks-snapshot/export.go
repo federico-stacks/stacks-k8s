@@ -31,12 +31,15 @@ const (
 	actorUser = 1000
 )
 
-// tarCommand streams the data root as an uncompressed tar; compression and filtering happen
-// locally, so the export image needs only sh and tar. The shell then waits for stdin to close
-// before exiting with tar's status. Once the process exits, the cluster ends the exec stream
-// after a short drain, so output still in flight to a slower reader is lost (WebSocket fails,
-// SPDY truncates silently). The capture closes stdin only after the end-of-archive marker.
-var tarCommand = []string{"sh", "-c", "tar -C " + dataMount + " -cf - . ; rc=$?; read -r line; exit $rc"}
+// tarScript streams the data root as an uncompressed tar; compression and filtering happen
+// locally, so the export image needs only sh and tar. After a successful tar the shell waits for
+// stdin to close before exiting: once the process exits, the cluster ends the exec stream after a
+// short drain, so output still in flight to a slower reader is lost (WebSocket fails, SPDY
+// truncates silently), and the capture closes stdin only after the end-of-archive marker. A
+// failed tar exits at once with its status, so the stream ends and its stderr is reported.
+const tarScript = `tar -C ` + dataMount + ` -cf - . || exit $?; read -r _; exit 0`
+
+var tarCommand = []string{"sh", "-c", tarScript}
 
 // removeExportPods deletes export Pods a previous capture of this network left behind.
 func (c *cluster) removeExportPods(ctx context.Context, networkUID string) error {
@@ -141,16 +144,31 @@ func (c *cluster) export(
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
+	if err != nil {
+		// A partial archive must never be mistaken for a capture result.
+		_ = os.Remove(file)
+	}
 	return sum, size, err
 }
 
-// archive runs tar in the export Pod and rewrites its output into dst.
+// streamer runs tarCommand in an export Pod: it writes the command's stdout to w and closes the
+// command's stdin when stdin reaches EOF.
+type streamer func(ctx context.Context, pod string, stdin io.Reader, w io.Writer) error
+
+// archive runs tar in the export Pod and rewrites its output into dst. A rewrite failure cancels
+// the stream at once instead of letting the rest of the volume drain.
 func (c *cluster) archive(ctx context.Context, pod string, dst io.Writer) (string, int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream := c.streamer
+	if stream == nil {
+		stream = c.stream
+	}
 	pr, pw := io.Pipe()
 	ackR, ack := io.Pipe()
 	streamed := make(chan error, 1)
 	go func() {
-		err := c.stream(ctx, pod, ackR, pw)
+		err := stream(ctx, pod, ackR, pw)
 		_ = pw.CloseWithError(err)
 		streamed <- err
 	}()
@@ -158,6 +176,7 @@ func (c *cluster) archive(ctx context.Context, pod string, dst io.Writer) (strin
 	// Closing stdin releases the remote shell: after the whole archive arrived, or on failure.
 	_ = ack.Close()
 	if err != nil {
+		cancel()
 		_ = pr.CloseWithError(err)
 		<-streamed
 		return "", 0, err
@@ -170,18 +189,20 @@ func (c *cluster) archive(ctx context.Context, pod string, dst io.Writer) (strin
 	return sum, size, nil
 }
 
-// limitedBuffer keeps the first bytes of a stream for error reports.
-type limitedBuffer struct{ bytes.Buffer }
+// limitedBuffer keeps the first bytes of a stream for error reports. The buffer is a named field,
+// so no promoted method can write past the bound.
+type limitedBuffer struct{ b bytes.Buffer }
 
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if room := 4096 - b.Len(); room > 0 {
-		b.Buffer.Write(p[:min(room, len(p))])
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if room := 4096 - l.b.Len(); room > 0 {
+		l.b.Write(p[:min(room, len(p))])
 	}
 	return len(p), nil
 }
 
-// stream executes tarCommand in the export container, writing its stdout to w; the command exits
-// once stdin reaches EOF.
+func (l *limitedBuffer) String() string { return l.b.String() }
+
+// stream executes tarCommand in the export container over the cluster's exec API.
 func (c *cluster) stream(ctx context.Context, pod string, stdin io.Reader, w io.Writer) error {
 	req := c.core.CoreV1().RESTClient().Post().
 		Resource("pods").

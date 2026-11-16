@@ -145,7 +145,8 @@ func fakeSource(t *testing.T, mutate func(objects []*unstructured.Unstructured))
 	root := &api.StacksNetwork{
 		ObjectMeta: metav1.ObjectMeta{Name: "network", UID: networkUID},
 		Status: api.StacksNetworkStatus{
-			GenesisRef: &common.Binding{Name: "genesis", UID: "genesis-uid"},
+			GenesisRef:    &common.Binding{Name: "genesis", UID: "genesis-uid"},
+			GenesisDigest: "sha256:" + strings.Repeat("e", 64),
 			Bitcoin: &api.BitcoinRuntimeStatus{ExecutionRefs: []common.Binding{
 				{Name: "exec-btc-01", UID: "exec-uid"},
 			}},
@@ -263,18 +264,51 @@ func TestClusterRefusesChangedIdentities(t *testing.T) {
 	}
 }
 
-func TestPatchOperationSetsTheOperationWithTheUIDGuard(t *testing.T) {
+// The stop records the settled tips in the same patch, so a failed export can resume. The patch
+// also carries metadata.uid; the API server, not this fake client, refuses it for a recreated
+// network of the same name.
+func TestStopRecordsTheTipsAResumeExportsFrom(t *testing.T) {
 	c, root := fakeSource(t, nil)
 	ctx := context.Background()
-	if err := c.patchOperation(ctx, root, api.NetworkOperationPaused); err != nil {
+	tips := capturedTips{
+		Bitcoin: api.SnapshotBitcoinTip{Height: 217, BlockHash: strings.Repeat("b", 64)},
+		Stacks: api.SnapshotStacksTip{
+			Height: 126, BlockHash: strings.Repeat("c", 64), IndexBlockID: strings.Repeat("d", 64), RewardCycle: 10,
+		},
+	}
+	if _, err := checkResumable(root); err == nil {
+		t.Fatal("a running network was accepted for resume")
+	}
+	recorded, err := tipsAnnotation(tips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.patchOperation(ctx, root, api.NetworkOperationStopped, recorded); err != nil {
 		t.Fatal(err)
 	}
 	got, err := c.network(ctx, networkUID, "network")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Spec.Operation != api.NetworkOperationPaused || got.UID != networkUID {
+	if got.Spec.Operation != api.NetworkOperationStopped || got.UID != networkUID {
 		t.Fatalf("network %+v", got.ObjectMeta)
+	}
+	if resumed, err := checkResumable(got); err != nil || resumed != tips {
+		t.Fatalf("resume tips %+v, %v", resumed, err)
+	}
+	for name, annotations := range map[string]map[string]string{
+		"stopped by hand":  nil,
+		"corrupt tips":     {captureAnnotation: `{"bitcoin":{"height":217,"blockHash":"zz"}}`},
+		"not a tip record": {captureAnnotation: "yes"},
+	} {
+		stopped := got.DeepCopy()
+		stopped.Annotations = annotations
+		if _, err := checkResumable(stopped); err == nil {
+			t.Fatalf("%s: resume accepted", name)
+		}
+	}
+	if err := checkCapturable(got); err == nil || !strings.Contains(err.Error(), `"resume": true`) {
+		t.Fatalf("a stopped network must point to resume: %v", err)
 	}
 }
 

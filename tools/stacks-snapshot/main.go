@@ -36,6 +36,8 @@ type request struct {
 	Output         string `json:"output"`
 	BitcoinHeight  int64  `json:"bitcoinHeight,omitempty"`
 	TimeoutSeconds int    `json:"timeoutSeconds"`
+	// Resume exports a network an earlier capture already stopped, with the tips it recorded.
+	Resume bool `json:"resume,omitempty"`
 }
 
 var (
@@ -61,9 +63,6 @@ func run(ctx context.Context, args []string, input io.Reader, output, logs io.Wr
 	}
 	r, err := readRequest(input)
 	if err != nil {
-		return err
-	}
-	if err = prepareOutput(r.Output); err != nil {
 		return err
 	}
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
@@ -126,6 +125,9 @@ func (r request) validate() error {
 	}
 	if r.BitcoinHeight < 0 || r.BitcoinHeight > 4294967295 {
 		return errors.New("invalid Bitcoin height")
+	}
+	if r.Resume && r.BitcoinHeight > 0 {
+		return errors.New("bitcoinHeight does not apply to a resumed export")
 	}
 	if r.TimeoutSeconds < 60 || r.TimeoutSeconds > 86400 {
 		return errors.New("timeoutSeconds must be between 60 and 86400")

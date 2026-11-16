@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -48,8 +50,9 @@ type step struct {
 	At   time.Time `json:"at"`
 }
 
-// capture checks the network, pauses it until its chain is still, records the tips, stops it,
-// exports every actor volume and writes the snapshot manifest.
+// capture checks the network, pauses it until its chain is still, stops it while recording the
+// tips, exports every actor volume and writes the snapshot manifest. With resume, it exports a
+// network an earlier capture already stopped, using the tips that capture recorded.
 func capture(ctx context.Context, c *cluster, r request, progress func(string)) (report, error) {
 	out := report{NetworkUID: r.NetworkUID, Snapshot: r.Snapshot}
 	mark := func(name, detail string) {
@@ -60,7 +63,22 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 	if err != nil {
 		return out, err
 	}
-	if err = checkCapturable(root); err != nil {
+	// Only once the network identity is confirmed, so a wrong UID leaves nothing behind.
+	if err = prepareOutput(r.Output); err != nil {
+		return out, err
+	}
+	if r.Resume {
+		tips, err := checkResumable(root)
+		if err != nil {
+			return out, err
+		}
+		if err = c.waitPhase(ctx, r.NetworkUID, r.Network, api.NetworkPhaseStopped); err != nil {
+			return out, err
+		}
+		out.Bitcoin, out.Stacks = tips.Bitcoin, tips.Stacks
+		mark("resumed", fmt.Sprintf("network %s was stopped by an earlier capture at Bitcoin %d, Stacks %d",
+			r.Network, out.Bitcoin.Height, out.Stacks.Height))
+	} else if err = checkCapturable(root); err != nil {
 		return out, err
 	}
 	members, err := c.cohort(ctx, root)
@@ -71,26 +89,52 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 	if err != nil {
 		return out, err
 	}
-	mark("checked", fmt.Sprintf("network %s is Initialized; %d cohort participants", r.Network, len(members)))
+	if !r.Resume {
+		mark("checked", fmt.Sprintf("network %s is Initialized; %d cohort participants", r.Network, len(members)))
+		if err = stopStill(ctx, c, r, root, members, &out, mark); err != nil {
+			return out, err
+		}
+	}
+	if err = exportArchives(ctx, c, r, members, participants, &out, progress); err != nil {
+		return out, fmt.Errorf(
+			"%w; the network is Stopped: retry the export with \"resume\": true and an empty output directory",
+			err,
+		)
+	}
+	mark("exported", fmt.Sprintf("%d archives exported", len(out.Archives)))
+	return out, writeManifest(r, root, participants, &out, mark)
+}
 
+// stopStill optionally waits for a Bitcoin height, pauses the network until its chain is still,
+// then stops it, recording the settled tips on the network for a later resume.
+func stopStill(
+	ctx context.Context,
+	c *cluster,
+	r request,
+	root *api.StacksNetwork,
+	members []member,
+	out *report,
+	mark func(name, detail string),
+) error {
+	var err error
 	if r.BitcoinHeight > 0 {
 		err = poll(ctx, fmt.Sprintf("Bitcoin height %d", r.BitcoinHeight), func() (bool, error) {
 			tip, _, err := c.bitcoinView(ctx, root)
 			return err == nil && tip.Height >= r.BitcoinHeight, err
 		})
 		if err != nil {
-			return out, err
+			return err
 		}
 		mark("reached-height", fmt.Sprintf("Bitcoin reached height %d", r.BitcoinHeight))
 	}
 
 	if root.Spec.Operation != api.NetworkOperationPaused {
-		if err = c.patchOperation(ctx, root, api.NetworkOperationPaused); err != nil {
-			return out, err
+		if err = c.patchOperation(ctx, root, api.NetworkOperationPaused, nil); err != nil {
+			return err
 		}
 	}
 	if err = c.waitPhase(ctx, r.NetworkUID, r.Network, api.NetworkPhasePaused); err != nil {
-		return out, err
+		return err
 	}
 	mark("paused", "network Paused; waiting for the chain to be still")
 
@@ -112,20 +156,38 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 		return still, nil
 	})
 	if err != nil {
-		return out, err
+		return err
 	}
 	mark("settled", fmt.Sprintf("chain still at Bitcoin %d, Stacks %d", out.Bitcoin.Height, out.Stacks.Height))
 
-	if err = c.patchOperation(ctx, root, api.NetworkOperationStopped); err != nil {
-		return out, err
+	recorded, err := tipsAnnotation(capturedTips{Bitcoin: out.Bitcoin, Stacks: out.Stacks})
+	if err != nil {
+		return err
+	}
+	if err = c.patchOperation(ctx, root, api.NetworkOperationStopped, recorded); err != nil {
+		return err
 	}
 	if err = c.waitPhase(ctx, r.NetworkUID, r.Network, api.NetworkPhaseStopped); err != nil {
-		return out, err
+		return err
 	}
 	mark("stopped", "network Stopped; exporting actor volumes")
+	return nil
+}
 
-	if err = c.removeExportPods(ctx, r.NetworkUID); err != nil {
-		return out, err
+// exportArchives exports every actor volume of the stopped network into the output directory and
+// records each archive's checksum in its participant.
+func exportArchives(
+	ctx context.Context,
+	c *cluster,
+	r request,
+	members []member,
+	participants []api.SnapshotParticipant,
+	out *report,
+	progress func(string),
+) error {
+	// Export Pods an interrupted capture of this network left behind.
+	if err := c.removeExportPods(ctx, r.NetworkUID); err != nil {
+		return err
 	}
 	byName := map[string]*api.StacksNetworkParticipant{}
 	for i := range members {
@@ -139,31 +201,81 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 		file := filepath.Join(r.Output, p.Archive.Path)
 		sum, size, err := c.export(ctx, r, byName[p.Name], file)
 		if err != nil {
-			return out, fmt.Errorf("export %s: %w", p.Name, err)
+			return fmt.Errorf("export %s: %w", p.Name, err)
 		}
 		p.Archive.SHA256 = sum
 		out.Archives = append(out.Archives, archiveReport{p.Name, p.Archive.Path, sum, size})
 		progress(fmt.Sprintf("exported %s (%d bytes)", p.Archive.Path, size))
 	}
-	mark("exported", fmt.Sprintf("%d archives exported", len(out.Archives)))
+	return nil
+}
 
+// writeManifest writes the snapshot resource and the image Dockerfile next to the archives.
+func writeManifest(
+	r request,
+	root *api.StacksNetwork,
+	participants []api.SnapshotParticipant,
+	out *report,
+	mark func(name, detail string),
+) error {
 	data, err := manifest(r.Snapshot, r.Image, root.Status.GenesisDigest, participants, out.Bitcoin, out.Stacks)
 	if err != nil {
-		return out, err
+		return err
 	}
 	out.Manifest = filepath.Join(r.Output, manifestFile)
 	if err = os.WriteFile(out.Manifest, data, 0o600); err != nil {
-		return out, fmt.Errorf("write manifest: %w", err)
+		return fmt.Errorf("write manifest: %w", err)
 	}
 	out.Dockerfile = filepath.Join(r.Output, dockerfileFile)
 	if err = os.WriteFile(out.Dockerfile, dockerfile(r.ExportImage), 0o600); err != nil {
-		return out, fmt.Errorf("write Dockerfile: %w", err)
+		return fmt.Errorf("write Dockerfile: %w", err)
 	}
 	mark("written", fmt.Sprintf(
 		"wrote %s and %s; build the snapshot image with docker build -t %s %s, then load it into kind or push it",
 		manifestFile, dockerfileFile, r.Image, r.Output,
 	))
-	return out, nil
+	return nil
+}
+
+// captureAnnotation records on a network the tips its capture settled on, in the same patch that
+// stops it, so an export that fails afterwards can be resumed: Stopped is terminal.
+const captureAnnotation = "snapshot.stacks.org/capture"
+
+// capturedTips are the tips a capture settled on before stopping the network.
+type capturedTips struct {
+	Bitcoin api.SnapshotBitcoinTip `json:"bitcoin"`
+	Stacks  api.SnapshotStacksTip  `json:"stacks"`
+}
+
+var hexHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func tipsAnnotation(tips capturedTips) (map[string]string, error) {
+	data, err := json.Marshal(tips)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{captureAnnotation: string(data)}, nil
+}
+
+// checkResumable accepts only a network an earlier capture stopped, with the tips it recorded.
+func checkResumable(root *api.StacksNetwork) (capturedTips, error) {
+	var tips capturedTips
+	switch {
+	case root.Spec.Operation != api.NetworkOperationStopped:
+		return tips, errors.New("resume requires a network an earlier capture stopped; this one is not Stopped")
+	case root.Status.GenesisRef == nil || root.Status.GenesisDigest == "":
+		return tips, errors.New("network has no frozen genesis")
+	}
+	recorded, ok := root.Annotations[captureAnnotation]
+	if !ok {
+		return tips, errors.New("network was not stopped by a capture: no recorded tips to resume from")
+	}
+	if err := json.Unmarshal([]byte(recorded), &tips); err != nil ||
+		!hexHash.MatchString(tips.Bitcoin.BlockHash) || !hexHash.MatchString(tips.Stacks.BlockHash) ||
+		!hexHash.MatchString(tips.Stacks.IndexBlockID) || tips.Bitcoin.Height <= 0 {
+		return capturedTips{}, errors.New("recorded capture tips are invalid")
+	}
+	return tips, nil
 }
 
 // dockerfile builds the snapshot image: the archives under /snapshot on a BusyBox-compatible base

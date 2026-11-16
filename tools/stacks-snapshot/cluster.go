@@ -38,6 +38,8 @@ type cluster struct {
 	core      kubernetes.Interface
 	exec      *rest.Config
 	namespace string
+	// streamer replaces the exec stream in tests; nil uses the cluster's exec API.
+	streamer streamer
 }
 
 func newCluster(config *rest.Config, namespace string) (*cluster, error) {
@@ -115,7 +117,8 @@ func (c *cluster) network(ctx context.Context, uid string, name string) (*api.St
 func checkCapturable(root *api.StacksNetwork) error {
 	switch {
 	case root.Spec.Operation == api.NetworkOperationStopped:
-		return errors.New("network is already stopped; capture records its live tips before stopping it")
+		return errors.New("network is already stopped; capture records its live tips before stopping it " +
+			"(to retry the export of an earlier capture, set \"resume\": true)")
 	case !meta.IsStatusConditionTrue(root.Status.Conditions, api.ConditionInitialized):
 		return errors.New("network is not Initialized")
 	case root.Status.GenesisRef == nil || root.Status.GenesisDigest == "":
@@ -237,11 +240,20 @@ func (c *cluster) stacksView(
 	return tip, seen, nil
 }
 
-// patchOperation sets the network operation. The UID in the patch makes the API server refuse
-// it for a recreated network of the same name.
-func (c *cluster) patchOperation(ctx context.Context, root *api.StacksNetwork, op api.NetworkOperation) error {
+// patchOperation sets the network operation, with any annotations in the same patch. The UID in
+// the patch makes the API server refuse it for a recreated network of the same name.
+func (c *cluster) patchOperation(
+	ctx context.Context,
+	root *api.StacksNetwork,
+	op api.NetworkOperation,
+	annotations map[string]string,
+) error {
+	metadata := map[string]any{"uid": root.UID}
+	if len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
 	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"uid": root.UID},
+		"metadata": metadata,
 		"spec":     map[string]any{"operation": op},
 	})
 	if err != nil {
