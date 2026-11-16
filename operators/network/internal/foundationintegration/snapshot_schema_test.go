@@ -31,6 +31,9 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 	archive := func(name string) *api.SnapshotArchive {
 		return &api.SnapshotArchive{Path: name + ".tar.gz", SHA256: hex(64), Image: "stacks-core:test"}
 	}
+	as := func(role api.SnapshotAccountRole) []api.SnapshotAccount {
+		return []api.SnapshotAccount{{Role: role, PublicIdentity: identity}}
+	}
 	valid := func(name string) *api.StacksChainstateSnapshot {
 		return &api.StacksChainstateSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name},
@@ -42,14 +45,16 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 					{
 						Name:          "node-01",
 						Kind:          api.ParticipantStacksNode,
-						Accounts:      []common.PublicIdentity{identity},
+						Accounts:      as(api.SnapshotAccountRoleIdentity),
 						MiningEnabled: ptr.To(true),
+						BitcoinNode:   "btc-01",
 						Archive:       archive("node-01"),
 					},
 					{
 						Name:     "signer-01",
 						Kind:     api.ParticipantStacksSigner,
-						Accounts: []common.PublicIdentity{identity},
+						Accounts: as(api.SnapshotAccountRoleSigner),
+						Node:     "node-01",
 						Archive:  archive("signer-01"),
 					},
 					{
@@ -57,6 +62,7 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 						Kind:           api.ParticipantStacksStacker,
 						AmountMicroSTX: ptr.To(common.Amount("1000")),
 						LockCycles:     ptr.To(int32(12)),
+						Signer:         "signer-01",
 					},
 					{Name: "blocks", Kind: api.ParticipantBitcoinBlockProduction},
 				},
@@ -112,6 +118,22 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 		"lock-cycles-range": func(s *api.StacksChainstateSnapshotSpec) {
 			s.Participants[3].LockCycles = ptr.To(int32(13))
 		},
+		// A projection that omits a compared field could never validate, so the schema requires it.
+		"node-without-mining":       func(s *api.StacksChainstateSnapshotSpec) { s.Participants[1].MiningEnabled = nil },
+		"node-without-bitcoin-node": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[1].BitcoinNode = "" },
+		"signer-without-node":       func(s *api.StacksChainstateSnapshotSpec) { s.Participants[2].Node = "" },
+		"stacker-without-signer":    func(s *api.StacksChainstateSnapshotSpec) { s.Participants[3].Signer = "" },
+		"stacker-without-stake": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[3].AmountMicroSTX = nil
+		},
+		"node-with-signer-link": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[1].Signer = "signer-01" },
+		"node-registry": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[1].RegistryThreshold = ptr.To(int32(2))
+		},
+		"duplicate-account": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[1].Accounts = append(s.Participants[1].Accounts, s.Participants[1].Accounts[0])
+		},
+		"unknown-role": func(s *api.StacksChainstateSnapshotSpec) { s.Participants[1].Accounts[0].Role = "Miner" },
 	} {
 		invalid := valid(name)
 		mutate(&invalid.Spec)

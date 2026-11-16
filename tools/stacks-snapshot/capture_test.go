@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -91,8 +92,10 @@ func TestManifestIsApplicableAndCarriesNoServerFields(t *testing.T) {
 	}
 	if got.APIVersion != "network.stacks.org/v1alpha2" || got.Kind != "StacksChainstateSnapshot" ||
 		got.Name != "epoch40" || got.Spec.Image != "snapshots:v1" || got.Spec.Bitcoin != btc ||
-		got.Spec.Stacks != stx || len(got.Spec.Participants) != 4 ||
-		got.Spec.Participants[1].Archive.SHA256 != strings.Repeat("a", 64) {
+		got.Spec.Stacks != stx || len(got.Spec.Participants) != 5 ||
+		got.Spec.Participants[1].Archive.SHA256 != strings.Repeat("a", 64) ||
+		!reflect.DeepEqual(got.Spec.Participants[3].Accounts, participants[3].Accounts) ||
+		got.Spec.Participants[3].Signer != "signer-01" {
 		t.Fatalf("round trip %+v", got)
 	}
 }
@@ -215,11 +218,17 @@ func TestClusterReadsTheFrozenCohortAndObservations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(members) != 4 || len(members[0].accounts) != 2 {
+	if len(members) != 5 || len(members[0].accounts) != 2 {
 		t.Fatalf("cohort %+v", members)
 	}
-	if _, err = project(members); err != nil {
+	// Roles come from each participant's admitted configuration read from the cluster.
+	projected, err := project(members)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if stacker := projected[3]; stacker.Name != "stacker-01" || len(stacker.Accounts) != 2 ||
+		stacker.Signer != "signer-01" {
+		t.Fatalf("stacker projected from the cluster: %+v", stacker)
 	}
 	btc, seen, err := c.bitcoinView(ctx, root)
 	if err != nil || btc.Height != 217 || btc.BlockHash != "btc-tip" || len(seen) != 1 {

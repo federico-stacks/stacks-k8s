@@ -1,6 +1,7 @@
 package foundation
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -39,6 +40,16 @@ type restoreMismatchError struct {
 	problems []string
 }
 
+// genesisFailureReason reports a restore mismatch as SnapshotMismatch, so it shows even on a
+// paused network, and any other compile failure as unavailable inputs.
+func genesisFailureReason(err error) string {
+	var mismatch *restoreMismatchError
+	if errors.As(err, &mismatch) {
+		return reasonSnapshotMismatch
+	}
+	return reasonGenesisInputsUnavailable
+}
+
 func (e *restoreMismatchError) Error() string {
 	const shown = 8
 	problems, more := e.problems, ""
@@ -48,10 +59,14 @@ func (e *restoreMismatchError) Error() string {
 	return fmt.Sprintf("snapshot %s does not match: %s%s", e.snapshot, strings.Join(problems, "; "), more)
 }
 
-// snapshotParticipant projects a cohort requirement onto the values restored data depends on.
-// Allocation identities (UIDs) and whole-policy digests are excluded, so resources, overrides
-// and placement may differ between the source and the restoring network.
-func snapshotParticipant(name string, req api.BootstrapRequirement) api.SnapshotParticipant {
+// snapshotParticipant projects a cohort member onto the values restored data depends on: public
+// identities by the role that selects them, links to other participants, mining role, stake and
+// registry threshold. Allocation identities (UIDs) and whole-policy digests are excluded, so
+// resources, overrides and placement may differ between the source and the restoring network.
+// The payout wallet is excluded too: it only receives new coinbase, and a restored Bitcoin node
+// imports the restoring network's wallet. The capture tool implements the same projection.
+func snapshotParticipant(name string, m restoreMember) api.SnapshotParticipant {
+	req, c := m.requirement, m.configuration
 	p := api.SnapshotParticipant{
 		Name:           name,
 		Kind:           req.Kind,
@@ -59,28 +74,79 @@ func snapshotParticipant(name string, req api.BootstrapRequirement) api.Snapshot
 		AmountMicroSTX: req.AmountMicroSTX,
 		LockCycles:     req.LockCycles,
 	}
-	seen := map[string]bool{}
+	identities := map[string]common.PublicIdentity{}
 	for _, a := range req.Accounts {
-		if !seen[a.Identity.Address] {
-			seen[a.Identity.Address] = true
-			p.Accounts = append(p.Accounts, a.Identity)
+		identities[a.Binding.Name] = a.Identity
+	}
+	add := func(role api.SnapshotAccountRole, ref *common.NameRef) {
+		if ref == nil {
+			return
+		}
+		if identity, ok := identities[ref.Name]; ok {
+			p.Accounts = append(p.Accounts, api.SnapshotAccount{Role: role, PublicIdentity: identity})
 		}
 	}
-	sortIdentities(p.Accounts)
+	// The capture tool keeps its own copy of this projection (tools/stacks-snapshot/cohort.go,
+	// projectParticipant); both must change together.
+	link := func(ref *common.NameRef) string {
+		if ref == nil {
+			return ""
+		}
+		return ref.Name
+	}
+	switch {
+	case c.StacksNode != nil:
+		add(api.SnapshotAccountRoleIdentity, c.StacksNode.IdentityAccountRef)
+		p.BitcoinNode = link(c.StacksNode.BitcoinNodeRef)
+	case c.StacksSigner != nil:
+		add(api.SnapshotAccountRoleSigner, c.StacksSigner.AccountRef)
+		p.Node = link(c.StacksSigner.NodeRef)
+	case c.StacksStacker != nil:
+		add(api.SnapshotAccountRoleHolder, c.StacksStacker.HolderAccountRef)
+		add(api.SnapshotAccountRoleAdministrator, c.StacksStacker.AdministratorAccountRef)
+		p.Signer = link(c.StacksStacker.SignerRef)
+	case c.StacksContractSet != nil:
+		add(api.SnapshotAccountRoleDeployer, c.StacksContractSet.DeployerAccountRef)
+		if registry := c.StacksContractSet.Initialization; registry != nil {
+			for i := range registry.SignerAccountRefs {
+				add(api.SnapshotAccountRoleRegistrySigner, &registry.SignerAccountRefs[i])
+			}
+			add(api.SnapshotAccountRoleAggregateKey, &registry.AggregateKeyAccountRef)
+			p.RegistryThreshold = ptr.To(registry.Threshold)
+		}
+	}
+	p.Accounts = normalizedAccounts(p.Accounts)
 	return p
 }
 
-func sortIdentities(ids []common.PublicIdentity) {
-	sort.Slice(ids, func(i, j int) bool { return ids[i].Address < ids[j].Address })
+// normalizedAccounts lower-cases public keys, sorts by role and address and drops duplicates, so
+// two projections of the same identities compare equal.
+func normalizedAccounts(accounts []api.SnapshotAccount) []api.SnapshotAccount {
+	out := make([]api.SnapshotAccount, 0, len(accounts))
+	for _, a := range accounts {
+		a.PublicKey = strings.ToLower(a.PublicKey)
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Role != out[j].Role {
+			return out[i].Role < out[j].Role
+		}
+		return out[i].Address < out[j].Address
+	})
+	unique := out[:0]
+	for i, a := range out {
+		if i == 0 || a != out[i-1] {
+			unique = append(unique, a)
+		}
+	}
+	return unique
 }
 
-func samePublicIdentities(a, b []common.PublicIdentity) bool {
+func sameAccounts(a, b []api.SnapshotAccount) bool {
+	a, b = normalizedAccounts(a), normalizedAccounts(b)
 	if len(a) != len(b) {
 		return false
 	}
-	a, b = append([]common.PublicIdentity(nil), a...), append([]common.PublicIdentity(nil), b...)
-	sortIdentities(a)
-	sortIdentities(b)
 	for i := range a {
 		if a[i] != b[i] {
 			return false
@@ -103,12 +169,15 @@ func actorImage(c api.Configuration) string {
 }
 
 // validateRestore checks that a restoring network reproduces the snapshot's chain configuration,
-// its exact initial cohort and the actor images that wrote the captured data. With
-// AllowDifferent, Stacks nodes and signers may run other images. On success it returns the facts
-// the genesis freezes: the restored chainstate and each actor's archive by cohort name.
+// its exact initial cohort and the actor images that wrote the captured data, and that the
+// snapshot was taken past the final initialization ceiling: restore completes every gate, so a
+// snapshot of a network still bootstrapping could never initialize. With AllowDifferent, Stacks
+// nodes and signers may run other images. On success it returns the facts the genesis freezes:
+// the restored chainstate and each actor's archive by cohort name.
 func validateRestore(
 	snapshot *api.StacksChainstateSnapshot,
 	genesisDigest string,
+	finalCeiling int64,
 	cohort map[string]restoreMember,
 	policy api.StacksImagePolicy,
 ) (*api.RestoredChainstate, map[string]api.SnapshotArchive, error) {
@@ -121,6 +190,12 @@ func validateRestore(
 			fmt.Sprintf("genesis digest %s differs from %s", genesisDigest, snapshot.Spec.GenesisDigest),
 		)
 	}
+	if height := snapshot.Spec.Bitcoin.Height; height < finalCeiling {
+		problems = append(problems, fmt.Sprintf(
+			"Bitcoin height %d is below the final initialization ceiling %d; capture an Initialized network",
+			height, finalCeiling,
+		))
+	}
 	recorded := map[string]bool{}
 	for _, want := range snapshot.Spec.Participants {
 		recorded[want.Name] = true
@@ -129,19 +204,25 @@ func validateRestore(
 			problems = append(problems, fmt.Sprintf("%s %s is missing from the initial cohort", want.Kind, want.Name))
 			continue
 		}
-		got := snapshotParticipant(want.Name, member.requirement)
+		got := snapshotParticipant(want.Name, member)
 		if got.Kind != want.Kind {
 			problems = append(problems, fmt.Sprintf("%s is %s, not %s", want.Name, got.Kind, want.Kind))
 			continue
 		}
-		if !samePublicIdentities(got.Accounts, want.Accounts) {
-			problems = append(problems, fmt.Sprintf("%s public identities differ", want.Name))
+		if !sameAccounts(got.Accounts, want.Accounts) {
+			problems = append(problems, fmt.Sprintf("%s public identities or their roles differ", want.Name))
+		}
+		if got.BitcoinNode != want.BitcoinNode || got.Node != want.Node || got.Signer != want.Signer {
+			problems = append(problems, fmt.Sprintf("%s links to other participants differ", want.Name))
 		}
 		if !ptr.Equal(got.MiningEnabled, want.MiningEnabled) {
 			problems = append(problems, fmt.Sprintf("%s mining role differs", want.Name))
 		}
 		if !ptr.Equal(got.AmountMicroSTX, want.AmountMicroSTX) || !ptr.Equal(got.LockCycles, want.LockCycles) {
 			problems = append(problems, fmt.Sprintf("%s stake differs", want.Name))
+		}
+		if !ptr.Equal(got.RegistryThreshold, want.RegistryThreshold) {
+			problems = append(problems, fmt.Sprintf("%s registry threshold differs", want.Name))
 		}
 		if want.Archive != nil {
 			archives[want.Name] = *want.Archive

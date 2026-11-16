@@ -82,16 +82,19 @@ spec:
                   the values a restore depends on.
                 items:
                   description: |-
-                    SnapshotParticipant is the restore-relevant projection of one initial cohort member.
-                    Per-network identities (UIDs) and whole-policy digests are deliberately absent: resources,
-                    overrides and placement may differ in a restoring network.
+                    SnapshotParticipant is the restore-relevant projection of one initial cohort member: the public
+                    identities by role, the links between participants, mining role, stake and registry threshold
+                    the captured chain depends on. Per-network identities (UIDs) and whole-policy digests are
+                    deliberately absent: resources, overrides and placement may differ in a restoring network.
+                    Worker accounts (transaction production, faucets) are not projected: they may change, and any
+                    they fund at genesis is already covered by the genesis digest.
                   properties:
                     accounts:
                       description: Accounts lists the public identities the participant
-                        used, ordered by address.
+                        uses, by the role that selects them.
                       items:
-                        description: PublicIdentity carries validated public account
-                          inputs.
+                        description: SnapshotAccount is one public identity a participant
+                          uses, with the role that selects it.
                         properties:
                           address:
                             description: Address is a testnet Stacks address.
@@ -103,13 +106,29 @@ spec:
                               key.
                             pattern: ^(02|03)[0-9a-fA-F]{64}$
                             type: string
+                          role:
+                            description: Role is the participant field that selects
+                              the account.
+                            enum:
+                            - Identity
+                            - Signer
+                            - Holder
+                            - Administrator
+                            - Deployer
+                            - RegistrySigner
+                            - AggregateKey
+                            type: string
                         required:
                         - address
                         - publicKey
+                        - role
                         type: object
                       maxItems: 1000
                       type: array
-                      x-kubernetes-list-type: atomic
+                      x-kubernetes-list-map-keys:
+                      - role
+                      - address
+                      x-kubernetes-list-type: map
                     amountMicroSTX:
                       description: AmountMicroSTX preserves a stacker's stake.
                       maxLength: 20
@@ -144,6 +163,10 @@ spec:
                       - path
                       - sha256
                       type: object
+                    bitcoinNode:
+                      description: BitcoinNode preserves a Stacks node's Bitcoin participant.
+                      maxLength: 63
+                      type: string
                     kind:
                       description: Kind is the participant domain.
                       enum:
@@ -172,6 +195,21 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
+                    node:
+                      description: Node preserves a signer's Stacks node participant.
+                      maxLength: 63
+                      type: string
+                    registryThreshold:
+                      description: RegistryThreshold preserves a contract set's initial
+                        bridge registry threshold.
+                      format: int32
+                      maximum: 100
+                      minimum: 1
+                      type: integer
+                    signer:
+                      description: Signer preserves a stacker's signer participant.
+                      maxLength: 63
+                      type: string
                   required:
                   - kind
                   - name
@@ -179,11 +217,19 @@ spec:
                   x-kubernetes-validations:
                   - message: exactly the actor kinds carry an archive
                     rule: has(self.archive) == (self.kind in ['BitcoinNode','StacksNode','StacksSigner'])
-                  - message: miningEnabled applies to StacksNode only
-                    rule: '!has(self.miningEnabled) || self.kind == ''StacksNode'''
-                  - message: stake applies to StacksStacker only
-                    rule: (!has(self.amountMicroSTX) && !has(self.lockCycles)) ||
-                      self.kind == 'StacksStacker'
+                  - message: miningEnabled is required on, and only on, a StacksNode
+                    rule: has(self.miningEnabled) == (self.kind == 'StacksNode')
+                  - message: bitcoinNode is required on, and only on, a StacksNode
+                    rule: has(self.bitcoinNode) == (self.kind == 'StacksNode')
+                  - message: node is required on, and only on, a StacksSigner
+                    rule: has(self.node) == (self.kind == 'StacksSigner')
+                  - message: signer is required on, and only on, a StacksStacker
+                    rule: has(self.signer) == (self.kind == 'StacksStacker')
+                  - message: stake is required on, and only on, a StacksStacker
+                    rule: 'self.kind == ''StacksStacker'' ? (has(self.amountMicroSTX)
+                      && has(self.lockCycles)) : (!has(self.amountMicroSTX) && !has(self.lockCycles))'
+                  - message: registryThreshold applies to StacksContractSet only
+                    rule: '!has(self.registryThreshold) || self.kind == ''StacksContractSet'''
                 maxItems: 1000
                 minItems: 1
                 type: array
@@ -228,146 +274,6 @@ spec:
             x-kubernetes-validations:
             - message: a snapshot carries at least one actor archive
               rule: self.participants.exists(p, has(p.archive))
-          status:
-            description: Status reports structural resolution.
-            properties:
-              bitcoinAddress:
-                description: BitcoinAddress is the resolved public wallet payout address.
-                type: string
-              conditions:
-                description: Conditions report resolution without runtime claims.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-              credentialsRef:
-                description: CredentialsRef identifies generated or imported private
-                  material.
-                properties:
-                  key:
-                    description: Key selects one entry.
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  name:
-                    description: Name selects a same-namespace Secret.
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                required:
-                - key
-                - name
-                type: object
-              credentialsUID:
-                description: CredentialsUID pins imported or generated key material
-                  after resolution.
-                type: string
-              dependencies:
-                description: Dependencies pins public source identities.
-                items:
-                  description: Binding identifies an exact resolved public dependency.
-                  properties:
-                    fingerprint:
-                      description: Fingerprint identifies public content when relevant.
-                      type: string
-                    kind:
-                      description: Kind identifies the API kind or participant kind.
-                      type: string
-                    name:
-                      description: Name is the public resource name.
-                      type: string
-                    uid:
-                      description: UID prevents same-name replacement from inheriting
-                        authority.
-                      type: string
-                  required:
-                  - kind
-                  - name
-                  - uid
-                  type: object
-                maxItems: 8
-                type: array
-              descriptor:
-                description: Descriptor is the supported public wallet descriptor.
-                type: string
-              digest:
-                description: Digest identifies resolved public inputs.
-                type: string
-              identity:
-                description: Identity contains public account information.
-                properties:
-                  address:
-                    description: Address is a testnet Stacks address.
-                    maxLength: 64
-                    pattern: ^ST[0-9A-HJKMNP-TV-Z]{26,39}$
-                    type: string
-                  publicKey:
-                    description: PublicKey is a compressed secp256k1 public key.
-                    pattern: ^(02|03)[0-9a-fA-F]{64}$
-                    type: string
-                required:
-                - address
-                - publicKey
-                type: object
-              observedGeneration:
-                description: ObservedGeneration identifies the evaluated spec.
-                format: int64
-                type: integer
-            type: object
         required:
         - spec
         type: object
@@ -376,5 +282,3 @@ spec:
           rule: self.spec == oldSelf.spec
     served: true
     storage: true
-    subresources:
-      status: {}

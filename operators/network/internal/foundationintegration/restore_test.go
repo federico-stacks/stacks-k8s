@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	bitcoin "github.com/cylewitruk-stacks/stacks-k8s/apis/network/bitcoin/v1alpha2"
+	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	stacks "github.com/cylewitruk-stacks/stacks-k8s/apis/network/stacks/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	"github.com/cylewitruk-stacks/stacks-k8s/operators/network/internal/foundation"
@@ -136,13 +137,15 @@ func snapshotOf(
 		t.Fatal(err)
 	}
 	zeros := func(n int) string { return strings.Repeat("0", n) }
+	gates := genesis.Spec.Bootstrap.Gates
 	snapshot := &api.StacksChainstateSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: api.StacksChainstateSnapshotSpec{
 			Image:         "snapshot:test",
 			GenesisDigest: source.Status.GenesisDigest,
-			Bitcoin:       api.SnapshotBitcoinTip{Height: 217, BlockHash: zeros(64)},
-			Stacks:        api.SnapshotStacksTip{Height: 126, BlockHash: zeros(64), IndexBlockID: zeros(64)},
+			// Captured from an Initialized network: past the final initialization ceiling.
+			Bitcoin: api.SnapshotBitcoinTip{Height: gates[len(gates)-1].BitcoinCeiling + 1, BlockHash: zeros(64)},
+			Stacks:  api.SnapshotStacksTip{Height: 126, BlockHash: zeros(64), IndexBlockID: zeros(64)},
 		},
 	}
 	for _, req := range genesis.Spec.Bootstrap.Requirements {
@@ -161,19 +164,54 @@ func snapshotOf(
 			AmountMicroSTX: req.AmountMicroSTX,
 			LockCycles:     req.LockCycles,
 		}
-		seen := map[string]bool{}
+		cfg := p.Status.Admission.Configuration
+		byName := map[string]api.PublicAccount{}
 		for _, a := range req.Accounts {
-			if !seen[a.Identity.Address] {
-				seen[a.Identity.Address] = true
-				member.Accounts = append(member.Accounts, a.Identity)
+			byName[a.Binding.Name] = a
+		}
+		roles := map[api.SnapshotAccountRole][]*common.NameRef{}
+		switch {
+		case cfg.StacksNode != nil:
+			roles[api.SnapshotAccountRoleIdentity] = []*common.NameRef{cfg.StacksNode.IdentityAccountRef}
+			member.BitcoinNode = cfg.StacksNode.BitcoinNodeRef.Name
+		case cfg.StacksSigner != nil:
+			roles[api.SnapshotAccountRoleSigner] = []*common.NameRef{cfg.StacksSigner.AccountRef}
+			member.Node = cfg.StacksSigner.NodeRef.Name
+		case cfg.StacksStacker != nil:
+			roles[api.SnapshotAccountRoleHolder] = []*common.NameRef{cfg.StacksStacker.HolderAccountRef}
+			roles[api.SnapshotAccountRoleAdministrator] = []*common.NameRef{cfg.StacksStacker.AdministratorAccountRef}
+			member.Signer = cfg.StacksStacker.SignerRef.Name
+		case cfg.StacksContractSet != nil:
+			roles[api.SnapshotAccountRoleDeployer] = []*common.NameRef{cfg.StacksContractSet.DeployerAccountRef}
+			if registry := cfg.StacksContractSet.Initialization; registry != nil {
+				for i := range registry.SignerAccountRefs {
+					roles[api.SnapshotAccountRoleRegistrySigner] = append(
+						roles[api.SnapshotAccountRoleRegistrySigner],
+						&registry.SignerAccountRefs[i],
+					)
+				}
+				roles[api.SnapshotAccountRoleAggregateKey] = []*common.NameRef{&registry.AggregateKeyAccountRef}
+				member.RegistryThreshold = ptr.To(registry.Threshold)
 			}
 		}
-		sort.Slice(
-			member.Accounts,
-			func(i, j int) bool { return member.Accounts[i].Address < member.Accounts[j].Address },
-		)
+		for role, refs := range roles {
+			for _, ref := range refs {
+				if a, ok := byName[ref.Name]; ok {
+					member.Accounts = append(
+						member.Accounts,
+						api.SnapshotAccount{Role: role, PublicIdentity: a.Identity},
+					)
+				}
+			}
+		}
+		// The API server keys accounts by role and address, so order does not matter to it; the
+		// operator normalizes order before comparing.
+		sort.Slice(member.Accounts, func(i, j int) bool {
+			return string(member.Accounts[i].Role)+member.Accounts[i].Address <
+				string(member.Accounts[j].Role)+member.Accounts[j].Address
+		})
 		var image *string
-		switch cfg := p.Status.Admission.Configuration; {
+		switch {
 		case cfg.BitcoinNode != nil:
 			image = cfg.BitcoinNode.Image
 		case cfg.StacksNode != nil:
@@ -318,7 +356,8 @@ func verifyChainstateRestore(
 		resolvedReason("SnapshotMismatch", "snapshot seed does not match"),
 	)
 	message := meta.FindStatusCondition(mismatched.Status.Conditions, "Resolved").Message
-	if !strings.Contains(message, "genesis digest") || !strings.Contains(message, "public identities differ") ||
+	if !strings.Contains(message, "genesis digest") ||
+		!strings.Contains(message, "public identities or their roles differ") ||
 		mismatched.Status.GenesisRef != nil || mismatched.Status.Phase != api.NetworkPhaseResolutionError {
 		t.Fatalf("mismatch not reported before freeze: %s %+v", message, mismatched.Status)
 	}

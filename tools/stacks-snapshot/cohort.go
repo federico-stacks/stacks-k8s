@@ -25,8 +25,10 @@ func archived(kind api.ParticipantKind) bool {
 }
 
 // project records what a restoring network must reproduce, the same projection restore
-// validation compares: names, kinds, public identities, mining role, stake and actor images.
-// Checksums are filled in after export.
+// validation compares: names, kinds, public identities by role, links between participants,
+// mining role, stake, registry threshold and actor images. Every bound account must use an
+// imported key, including worker accounts that are not compared: genesis funding puts them in
+// the genesis digest. Checksums are filled in after export.
 func project(members []member) ([]api.SnapshotParticipant, error) {
 	var generated, problems []string
 	out := make([]api.SnapshotParticipant, 0, len(members))
@@ -37,21 +39,16 @@ func project(members []member) ([]api.SnapshotParticipant, error) {
 				generated = append(generated, a.Name)
 			}
 		}
-		p := api.SnapshotParticipant{
-			Name:           m.participant.Spec.ParticipantName,
-			Kind:           m.requirement.Kind,
-			MiningEnabled:  m.requirement.MiningEnabled,
-			AmountMicroSTX: m.requirement.AmountMicroSTX,
-			LockCycles:     m.requirement.LockCycles,
+		if m.participant.Status.Admission == nil {
+			problems = append(problems, fmt.Sprintf("%s has no admitted configuration",
+				m.participant.Spec.ParticipantName))
+			continue
 		}
-		seen := map[string]bool{}
-		for _, a := range m.requirement.Accounts {
-			if !seen[a.Identity.Address] {
-				seen[a.Identity.Address] = true
-				p.Accounts = append(p.Accounts, a.Identity)
-			}
-		}
-		sort.Slice(p.Accounts, func(i, j int) bool { return p.Accounts[i].Address < p.Accounts[j].Address })
+		p := projectParticipant(
+			m.participant.Spec.ParticipantName,
+			m.requirement,
+			m.participant.Status.Admission.Configuration,
+		)
 		if archived(p.Kind) {
 			image := actorImage(&m.participant)
 			if image == "" {
@@ -74,6 +71,74 @@ func project(members []member) ([]api.SnapshotParticipant, error) {
 		return nil, errors.New(strings.Join(problems, "; "))
 	}
 	return out, nil
+}
+
+// projectParticipant projects one cohort member exactly as the operator's restore validation does
+// (operators/network/internal/foundation/restore.go, snapshotParticipant): accounts by the role
+// that selects them, public keys in lower case, sorted by role and address.
+func projectParticipant(name string, req api.BootstrapRequirement, c api.Configuration) api.SnapshotParticipant {
+	p := api.SnapshotParticipant{
+		Name:           name,
+		Kind:           req.Kind,
+		MiningEnabled:  req.MiningEnabled,
+		AmountMicroSTX: req.AmountMicroSTX,
+		LockCycles:     req.LockCycles,
+	}
+	identities := map[string]common.PublicIdentity{}
+	for _, a := range req.Accounts {
+		identities[a.Binding.Name] = a.Identity
+	}
+	add := func(role api.SnapshotAccountRole, ref *common.NameRef) {
+		if ref == nil {
+			return
+		}
+		if identity, ok := identities[ref.Name]; ok {
+			identity.PublicKey = strings.ToLower(identity.PublicKey)
+			p.Accounts = append(p.Accounts, api.SnapshotAccount{Role: role, PublicIdentity: identity})
+		}
+	}
+	link := func(ref *common.NameRef) string {
+		if ref == nil {
+			return ""
+		}
+		return ref.Name
+	}
+	switch {
+	case c.StacksNode != nil:
+		add(api.SnapshotAccountRoleIdentity, c.StacksNode.IdentityAccountRef)
+		p.BitcoinNode = link(c.StacksNode.BitcoinNodeRef)
+	case c.StacksSigner != nil:
+		add(api.SnapshotAccountRoleSigner, c.StacksSigner.AccountRef)
+		p.Node = link(c.StacksSigner.NodeRef)
+	case c.StacksStacker != nil:
+		add(api.SnapshotAccountRoleHolder, c.StacksStacker.HolderAccountRef)
+		add(api.SnapshotAccountRoleAdministrator, c.StacksStacker.AdministratorAccountRef)
+		p.Signer = link(c.StacksStacker.SignerRef)
+	case c.StacksContractSet != nil:
+		add(api.SnapshotAccountRoleDeployer, c.StacksContractSet.DeployerAccountRef)
+		if registry := c.StacksContractSet.Initialization; registry != nil {
+			for i := range registry.SignerAccountRefs {
+				add(api.SnapshotAccountRoleRegistrySigner, &registry.SignerAccountRefs[i])
+			}
+			add(api.SnapshotAccountRoleAggregateKey, &registry.AggregateKeyAccountRef)
+			threshold := registry.Threshold
+			p.RegistryThreshold = &threshold
+		}
+	}
+	sort.Slice(p.Accounts, func(i, j int) bool {
+		if p.Accounts[i].Role != p.Accounts[j].Role {
+			return p.Accounts[i].Role < p.Accounts[j].Role
+		}
+		return p.Accounts[i].Address < p.Accounts[j].Address
+	})
+	unique := p.Accounts[:0]
+	for i, a := range p.Accounts {
+		if i == 0 || a != p.Accounts[i-1] {
+			unique = append(unique, a)
+		}
+	}
+	p.Accounts = unique
+	return p
 }
 
 // actorImage returns the admitted image that writes an actor's data, or empty.

@@ -2,7 +2,6 @@ package foundation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -672,12 +671,7 @@ func (r *Reconciler) reconcileTopology(ctx context.Context, req ctrl.Request) (c
 	}
 	spec, err := compileGenesis(ctx, r.Client, &root, all)
 	if err != nil {
-		reason := reasonGenesisInputsUnavailable
-		var mismatch *restoreMismatchError
-		if errors.As(err, &mismatch) {
-			reason = reasonSnapshotMismatch
-		}
-		return r.report(ctx, &root, base, api.NetworkPhaseResolutionError, reason, err.Error())
+		return r.report(ctx, &root, base, api.NetworkPhaseResolutionError, genesisFailureReason(err), err.Error())
 	}
 	root.Status.InputDigest = spec.Source.InputDigest
 	if root.Spec.ExpectedInputDigest != nil && *root.Spec.ExpectedInputDigest != spec.Source.InputDigest {
@@ -730,6 +724,10 @@ func (r *Reconciler) reconcileTopology(ctx context.Context, req ctrl.Request) (c
 	}
 	currentSpec, err := compileGenesis(ctx, r.Reader, &root, fresh)
 	if err != nil {
+		// A snapshot replaced between the cached and the uncached compile is still a mismatch.
+		if reason := genesisFailureReason(err); reason == reasonSnapshotMismatch {
+			return r.report(ctx, &root, base, api.NetworkPhaseResolutionError, reason, err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 	if !equal(currentSpec, spec) {

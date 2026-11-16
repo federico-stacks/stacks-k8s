@@ -11,18 +11,17 @@ import (
 // until the network freezes; its image must stay available while the network exists.
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:subresource:status
 // +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="chainstate snapshots are immutable"
 type StacksChainstateSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	// Spec identifies the artifact and the public inputs a restoring network must reproduce.
 	Spec StacksChainstateSnapshotSpec `json:"spec"`
-	// Status reports structural resolution.
-	Status common.ResolutionStatus `json:"status,omitempty"`
 }
 
 // StacksChainstateSnapshotSpec identifies an artifact and its source network's initial cohort.
+// A restoring network pins the JSON digest of this spec, so every field added later must be
+// optional and omitempty: otherwise existing snapshots change fingerprint on an operator upgrade.
 // +kubebuilder:validation:XValidation:rule="self.participants.exists(p, has(p.archive))",message="a snapshot carries at least one actor archive"
 type StacksChainstateSnapshotSpec struct {
 	// Image carries the actor archives under /snapshot and provides a POSIX shell with tar (gzip),
@@ -48,12 +47,19 @@ type StacksChainstateSnapshotSpec struct {
 	Stacks SnapshotStacksTip `json:"stacks"`
 }
 
-// SnapshotParticipant is the restore-relevant projection of one initial cohort member.
-// Per-network identities (UIDs) and whole-policy digests are deliberately absent: resources,
-// overrides and placement may differ in a restoring network.
+// SnapshotParticipant is the restore-relevant projection of one initial cohort member: the public
+// identities by role, the links between participants, mining role, stake and registry threshold
+// the captured chain depends on. Per-network identities (UIDs) and whole-policy digests are
+// deliberately absent: resources, overrides and placement may differ in a restoring network.
+// Worker accounts (transaction production, faucets) are not projected: they may change, and any
+// they fund at genesis is already covered by the genesis digest.
 // +kubebuilder:validation:XValidation:rule="has(self.archive) == (self.kind in ['BitcoinNode','StacksNode','StacksSigner'])",message="exactly the actor kinds carry an archive"
-// +kubebuilder:validation:XValidation:rule="!has(self.miningEnabled) || self.kind == 'StacksNode'",message="miningEnabled applies to StacksNode only"
-// +kubebuilder:validation:XValidation:rule="(!has(self.amountMicroSTX) && !has(self.lockCycles)) || self.kind == 'StacksStacker'",message="stake applies to StacksStacker only"
+// +kubebuilder:validation:XValidation:rule="has(self.miningEnabled) == (self.kind == 'StacksNode')",message="miningEnabled is required on, and only on, a StacksNode"
+// +kubebuilder:validation:XValidation:rule="has(self.bitcoinNode) == (self.kind == 'StacksNode')",message="bitcoinNode is required on, and only on, a StacksNode"
+// +kubebuilder:validation:XValidation:rule="has(self.node) == (self.kind == 'StacksSigner')",message="node is required on, and only on, a StacksSigner"
+// +kubebuilder:validation:XValidation:rule="has(self.signer) == (self.kind == 'StacksStacker')",message="signer is required on, and only on, a StacksStacker"
+// +kubebuilder:validation:XValidation:rule="self.kind == 'StacksStacker' ? (has(self.amountMicroSTX) && has(self.lockCycles)) : (!has(self.amountMicroSTX) && !has(self.lockCycles))",message="stake is required on, and only on, a StacksStacker"
+// +kubebuilder:validation:XValidation:rule="!has(self.registryThreshold) || self.kind == 'StacksContractSet'",message="registryThreshold applies to StacksContractSet only"
 type SnapshotParticipant struct {
 	// Name is the source network-relative instance name.
 	// +kubebuilder:validation:MinLength=1
@@ -62,20 +68,44 @@ type SnapshotParticipant struct {
 	Name string `json:"name"`
 	// Kind is the participant domain.
 	Kind ParticipantKind `json:"kind"`
-	// Accounts lists the public identities the participant used, ordered by address.
+	// Accounts lists the public identities the participant uses, by the role that selects them.
 	// +kubebuilder:validation:MaxItems=1000
-	// +listType=atomic
-	Accounts []common.PublicIdentity `json:"accounts,omitempty"`
+	// +listType=map
+	// +listMapKey=role
+	// +listMapKey=address
+	Accounts []SnapshotAccount `json:"accounts,omitempty"`
 	// MiningEnabled preserves a Stacks node's mining role.
 	MiningEnabled *bool `json:"miningEnabled,omitempty"`
+	// BitcoinNode preserves a Stacks node's Bitcoin participant.
+	// +kubebuilder:validation:MaxLength=63
+	BitcoinNode string `json:"bitcoinNode,omitempty"`
+	// Node preserves a signer's Stacks node participant.
+	// +kubebuilder:validation:MaxLength=63
+	Node string `json:"node,omitempty"`
+	// Signer preserves a stacker's signer participant.
+	// +kubebuilder:validation:MaxLength=63
+	Signer string `json:"signer,omitempty"`
 	// AmountMicroSTX preserves a stacker's stake.
 	AmountMicroSTX *common.Amount `json:"amountMicroSTX,omitempty"`
 	// LockCycles preserves a stacker's lock coverage.
 	// +kubebuilder:validation:Minimum=2
 	// +kubebuilder:validation:Maximum=12
 	LockCycles *int32 `json:"lockCycles,omitempty"`
+	// RegistryThreshold preserves a contract set's initial bridge registry threshold.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	RegistryThreshold *int32 `json:"registryThreshold,omitempty"`
 	// Archive locates an actor's captured data.
 	Archive *SnapshotArchive `json:"archive,omitempty"`
+}
+
+// SnapshotAccount is one public identity a participant uses, with the role that selects it.
+type SnapshotAccount struct {
+	// Role is the participant field that selects the account.
+	// +kubebuilder:validation:Enum=Identity;Signer;Holder;Administrator;Deployer;RegistrySigner;AggregateKey
+	Role SnapshotAccountRole `json:"role"`
+	// PublicIdentity is the account's address and public key; the key is compared in lower case.
+	common.PublicIdentity `json:",inline"`
 }
 
 // SnapshotArchive locates one actor's captured data in the snapshot image.
@@ -129,6 +159,3 @@ type StacksChainstateSnapshotList struct {
 	// Items contains objects.
 	Items []StacksChainstateSnapshot `json:"items"`
 }
-
-// GetResolutionStatus exposes independent snapshot validation.
-func (v *StacksChainstateSnapshot) GetResolutionStatus() *common.ResolutionStatus { return &v.Status }

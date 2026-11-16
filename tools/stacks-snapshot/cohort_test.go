@@ -37,40 +37,78 @@ func participant(name string, kind api.ParticipantKind, config api.Configuration
 	}
 }
 
+// bound binds one StacksAccount by name to a public identity, as a compiled requirement does.
+func bound(name string, n byte) api.PublicAccount {
+	return api.PublicAccount{Binding: common.Binding{Kind: stacks.KindStacksAccount, Name: name}, Identity: identity(n)}
+}
+
+func ref(name string) *common.NameRef { return &common.NameRef{Name: name} }
+
 func cohortFixture() []member {
 	node := participant("node-01", api.ParticipantStacksNode, api.Configuration{
-		StacksNode: &stacks.StacksNodeSpec{ActorFields: common.ActorFields{Image: ptr.To("stacks-node:3.1")}},
+		StacksNode: &stacks.StacksNodeSpec{
+			ActorFields:        common.ActorFields{Image: ptr.To("stacks-node:3.1")},
+			IdentityAccountRef: ref("miner"),
+			BitcoinNodeRef:     ref("btc-01"),
+		},
 	})
 	signer := participant("signer-01", api.ParticipantStacksSigner, api.Configuration{
-		StacksSigner: &stacks.StacksSignerSpec{ActorFields: common.ActorFields{Image: ptr.To("stacks-signer:3.1")}},
+		StacksSigner: &stacks.StacksSignerSpec{
+			ActorFields: common.ActorFields{Image: ptr.To("stacks-signer:3.1")},
+			NodeRef:     ref("node-01"),
+			AccountRef:  ref("consensus"),
+		},
 	})
 	btc := participant("btc-01", api.ParticipantBitcoinNode, api.Configuration{
 		BitcoinNode: &bitcoin.BitcoinNodeSpec{ActorFields: common.ActorFields{Image: ptr.To("bitcoind:28")}},
 	})
-	stacker := participant("stacker-01", api.ParticipantStacksStacker, api.Configuration{})
+	stacker := participant("stacker-01", api.ParticipantStacksStacker, api.Configuration{
+		StacksStacker: &stacks.StacksStackerSpec{
+			HolderAccountRef:        ref("holder"),
+			AdministratorAccountRef: ref("admin"),
+			SignerRef:               ref("signer-01"),
+		},
+	})
+	traffic := participant("traffic", api.ParticipantStacksTransactionProduction, api.Configuration{
+		StacksTransactionProduction: &stacks.StacksTransactionProductionSpec{AccountRef: ref("sender")},
+	})
 	return []member{
 		{
 			requirement: api.BootstrapRequirement{
 				Kind:          api.ParticipantStacksNode,
 				MiningEnabled: ptr.To(true),
-				Accounts: []api.PublicAccount{
-					{Binding: common.Binding{Kind: stacks.KindStacksAccount, Name: "miner"}, Identity: identity(2)},
-					{Binding: common.Binding{Kind: stacks.KindStacksAccount, Name: "miner"}, Identity: identity(2)},
-					{Binding: common.Binding{Kind: stacks.KindStacksAccount, Name: "other"}, Identity: identity(1)},
-				},
+				// An account bound without a role (here "other") is not projected.
+				Accounts: []api.PublicAccount{bound("miner", 2), bound("miner", 2), bound("other", 1)},
 			},
 			participant: node,
 			accounts:    []stacks.StacksAccount{account("miner", imported), account("other", imported)},
 		},
-		{requirement: api.BootstrapRequirement{Kind: api.ParticipantStacksSigner}, participant: signer},
+		{
+			requirement: api.BootstrapRequirement{
+				Kind:     api.ParticipantStacksSigner,
+				Accounts: []api.PublicAccount{bound("consensus", 3)},
+			},
+			participant: signer,
+			accounts:    []stacks.StacksAccount{account("consensus", imported)},
+		},
 		{requirement: api.BootstrapRequirement{Kind: api.ParticipantBitcoinNode}, participant: btc},
 		{
 			requirement: api.BootstrapRequirement{
 				Kind:           api.ParticipantStacksStacker,
 				AmountMicroSTX: ptr.To(common.Amount("1000")),
 				LockCycles:     ptr.To[int32](12),
+				Accounts:       []api.PublicAccount{bound("holder", 4), bound("admin", 5)},
 			},
 			participant: stacker,
+			accounts:    []stacks.StacksAccount{account("holder", imported), account("admin", imported)},
+		},
+		{
+			requirement: api.BootstrapRequirement{
+				Kind:     api.ParticipantStacksTransactionProduction,
+				Accounts: []api.PublicAccount{bound("sender", 6)},
+			},
+			participant: traffic,
+			accounts:    []stacks.StacksAccount{account("sender", imported)},
 		},
 	}
 }
@@ -84,12 +122,13 @@ func TestProjectRecordsWhatRestoreValidates(t *testing.T) {
 	for _, p := range got {
 		names = append(names, p.Name)
 	}
-	if strings.Join(names, ",") != "btc-01,node-01,signer-01,stacker-01" {
+	if strings.Join(names, ",") != "btc-01,node-01,signer-01,stacker-01,traffic" {
 		t.Fatalf("order %v", names)
 	}
 	node := got[1]
 	if node.Kind != api.ParticipantStacksNode || !ptr.Deref(node.MiningEnabled, false) ||
-		len(node.Accounts) != 2 || node.Accounts[0] != identity(1) || node.Accounts[1] != identity(2) {
+		node.BitcoinNode != "btc-01" || len(node.Accounts) != 1 ||
+		node.Accounts[0] != (api.SnapshotAccount{Role: api.SnapshotAccountRoleIdentity, PublicIdentity: identity(2)}) {
 		t.Fatalf("node projection %+v", node)
 	}
 	if node.Archive == nil || node.Archive.Path != "node-01.tar.gz" || node.Archive.Image != "stacks-node:3.1" {
@@ -98,9 +137,54 @@ func TestProjectRecordsWhatRestoreValidates(t *testing.T) {
 	if got[0].Archive.Image != "bitcoind:28" || got[2].Archive.Image != "stacks-signer:3.1" {
 		t.Fatalf("actor images %+v %+v", got[0].Archive, got[2].Archive)
 	}
+	if signer := got[2]; signer.Node != "node-01" || len(signer.Accounts) != 1 ||
+		signer.Accounts[0].Role != api.SnapshotAccountRoleSigner {
+		t.Fatalf("signer projection %+v", signer)
+	}
 	stacker := got[3]
-	if stacker.Archive != nil || *stacker.AmountMicroSTX != "1000" || *stacker.LockCycles != 12 {
+	wantStacker := []api.SnapshotAccount{
+		{Role: api.SnapshotAccountRoleAdministrator, PublicIdentity: identity(5)},
+		{Role: api.SnapshotAccountRoleHolder, PublicIdentity: identity(4)},
+	}
+	if stacker.Archive != nil || *stacker.AmountMicroSTX != "1000" || *stacker.LockCycles != 12 ||
+		stacker.Signer != "signer-01" || len(stacker.Accounts) != 2 ||
+		stacker.Accounts[0] != wantStacker[0] || stacker.Accounts[1] != wantStacker[1] {
 		t.Fatalf("stacker projection %+v", stacker)
+	}
+	// Worker accounts are not compared on restore, so they are not recorded.
+	if traffic := got[4]; len(traffic.Accounts) != 0 {
+		t.Fatalf("traffic projection %+v", traffic)
+	}
+}
+
+func TestProjectRecordsTheRegistry(t *testing.T) {
+	sbtc := participant("sbtc", api.ParticipantStacksContractSet, api.Configuration{
+		StacksContractSet: &stacks.StacksContractSetSpec{
+			DeployerAccountRef: ref("deployer"),
+			Initialization: &stacks.RegistryInitialization{
+				SignerAccountRefs:      []common.NameRef{*ref("bridge-1"), *ref("bridge-2")},
+				AggregateKeyAccountRef: *ref("aggregate"),
+				Threshold:              2,
+			},
+		},
+	})
+	req := api.BootstrapRequirement{
+		Kind: api.ParticipantStacksContractSet,
+		Accounts: []api.PublicAccount{
+			bound("deployer", 1), bound("bridge-1", 2), bound("bridge-2", 3), bound("aggregate", 4),
+		},
+	}
+	got, err := project([]member{{requirement: req, participant: sbtc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := []string{}
+	for _, a := range got[0].Accounts {
+		roles = append(roles, string(a.Role))
+	}
+	if strings.Join(roles, ",") != "AggregateKey,Deployer,RegistrySigner,RegistrySigner" ||
+		!ptr.Equal(got[0].RegistryThreshold, ptr.To[int32](2)) {
+		t.Fatalf("contract set projection %+v", got[0])
 	}
 }
 
@@ -126,10 +210,16 @@ func TestProjectRefusesGeneratedKeys(t *testing.T) {
 	}
 }
 
-func TestProjectRequiresActorImages(t *testing.T) {
+func TestProjectRequiresAdmittedActorImages(t *testing.T) {
 	members := cohortFixture()
-	members[2].participant.Status.Admission = nil
+	members[2].participant.Status.Admission.Configuration.BitcoinNode.Image = nil
 	if _, err := project(members); err == nil || !strings.Contains(err.Error(), "btc-01 has no admitted actor image") {
+		t.Fatalf("got %v", err)
+	}
+	members = cohortFixture()
+	members[2].participant.Status.Admission = nil
+	_, err := project(members)
+	if err == nil || !strings.Contains(err.Error(), "btc-01 has no admitted configuration") {
 		t.Fatalf("got %v", err)
 	}
 }

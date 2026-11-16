@@ -406,6 +406,7 @@ func compileGenesis(
 		restored, archives, err := validateRestore(
 			snapshot,
 			Digest(spec.Chain),
+			spec.Bootstrap.Gates[len(spec.Bootstrap.Gates)-1].BitcoinCeiling,
 			cohort,
 			root.Spec.Genesis.Restore.StacksImagePolicy,
 		)
