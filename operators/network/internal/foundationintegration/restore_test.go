@@ -227,9 +227,10 @@ func snapshotOf(
 	return snapshot
 }
 
-// admitRestoreCopy admits minimal.yaml into another namespace as a restoring network. With
-// importKeys, every account imports the source network's key, so public identities match. A
-// non-empty policy sets the restore's stacksImagePolicy.
+// admitRestoreCopy admits the documented restore.yaml example into another namespace, restoring
+// from snapshot. With importKeys, every account imports the source network's key, so public
+// identities match; without it, every account generates a new key. A non-empty policy replaces
+// the example's stacksImagePolicy.
 func admitRestoreCopy(
 	t *testing.T,
 	ctx context.Context,
@@ -239,7 +240,7 @@ func admitRestoreCopy(
 	policy api.StacksImagePolicy,
 ) {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "..", "docs", "design", "public-api", "examples", "minimal.yaml")
+	path := filepath.Join("..", "..", "..", "..", "docs", "design", "public-api", "examples", "restore.yaml")
 	// #nosec G304 -- Path is derived from repository fixtures, not a remote request.
 	file, err := os.Open(path)
 	if err != nil {
@@ -265,15 +266,28 @@ func admitRestoreCopy(
 			obj.SetNamespace(target)
 			if importKeys {
 				importAccountKey(t, ctx, c, source, obj)
+			} else if err := unstructured.SetNestedField(
+				obj.Object, map[string]any{"generate": true}, "spec", "key",
+			); err != nil {
+				t.Fatal(err)
 			}
 		case api.KindStacksNetwork:
 			obj.SetNamespace(target)
-			restore := map[string]any{"snapshotRef": map[string]any{"name": snapshot}}
-			if policy != "" {
-				restore["stacksImagePolicy"] = string(policy)
+			restore := []string{"spec", "genesis", "restore"}
+			if _, found, _ := unstructured.NestedMap(obj.Object, restore...); !found {
+				t.Fatalf("%s declares no genesis.restore", path)
 			}
-			if err := unstructured.SetNestedField(obj.Object, restore, "spec", "genesis", "restore"); err != nil {
+			if err := unstructured.SetNestedField(
+				obj.Object, snapshot, append(restore, "snapshotRef", "name")...,
+			); err != nil {
 				t.Fatal(err)
+			}
+			if policy != "" {
+				if err := unstructured.SetNestedField(
+					obj.Object, string(policy), append(restore, "stacksImagePolicy")...,
+				); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := unstructured.SetNestedField(obj.Object, "Running", "spec", "operation"); err != nil {
 				t.Fatal(err)
