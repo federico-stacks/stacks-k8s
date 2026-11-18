@@ -106,6 +106,9 @@ nodes can be added to any of them.
   capture and again at restore.
 - An archive captured from a restored network never carries a valid restore
   marker: a marker holds its own archive's checksum, which no archive can contain.
+- Files are dropped by name. The list was checked against stacks-core 4.0.5 (a key
+  scan of the archives found none); recheck it when a supported release adds data
+  files.
 
 ## Capture
 
