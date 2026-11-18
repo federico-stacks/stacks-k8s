@@ -31,7 +31,8 @@ not affect a running restored network. The image must stay pullable, since every
 restored actor start runs it.
 
 A [capture tool](../../tools/stacks-snapshot/README.md) produces the archives,
-the manifest and a Dockerfile from a source network. It uses the caller's
+the manifest and a Dockerfile from a source network; the
+[operations guide](../network-operator/chainstate-snapshots.md) covers the workflow. It uses the caller's
 credentials; the operator gains no permissions.
 
 ## Restore sequence

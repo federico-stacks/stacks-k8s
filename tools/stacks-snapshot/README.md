@@ -5,7 +5,9 @@ result is one gzip tar archive per Bitcoin node, Stacks node and signer, a
 ready-to-apply `StacksChainstateSnapshot` manifest and a Dockerfile for the snapshot
 image that carries the archives. A network that sets
 `spec.genesis.restore.snapshotRef` to that resource starts from the captured chain
-instead of initializing from genesis.
+instead of initializing from genesis. The
+[operations guide](../../docs/network-operator/chainstate-snapshots.md) walks through
+the whole workflow, from a source network with imported keys to a restore.
 
 Capture **stops the source network**. `Stopped` is terminal, so capture a network you
 no longer need running. If the export fails after the stop, rerun the same request
