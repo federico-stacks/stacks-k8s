@@ -73,7 +73,8 @@ without it nothing below applies. Resolution and freeze follow the steps above, 
 
 - **Validation.** The candidate is compared with the snapshot on every resolution and again
   at freeze: genesisDigest, the exact initial cohort (no member missing or extra), public
-  accounts by role, participant links, mining role, stake, registry threshold, Bitcoin node
+  accounts by role, participant links, mining role, stake, registry threshold and signer
+  order, Bitcoin node
   images, and Stacks node/signer images unless stacksImagePolicy is AllowDifferent. A
   snapshot below the final initialization ceiling is refused. Any difference reports phase
   ResolutionError, reason SnapshotMismatch, with every difference in the message, also

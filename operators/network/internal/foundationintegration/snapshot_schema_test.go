@@ -130,6 +130,9 @@ func verifyChainstateSnapshotSchema(t *testing.T, ctx context.Context, c client.
 		"node-registry": func(s *api.StacksChainstateSnapshotSpec) {
 			s.Participants[1].RegistryThreshold = ptr.To(int32(2))
 		},
+		"node-registry-signers": func(s *api.StacksChainstateSnapshotSpec) {
+			s.Participants[1].RegistrySigners = []string{s.Participants[1].Accounts[0].Address}
+		},
 		"duplicate-account": func(s *api.StacksChainstateSnapshotSpec) {
 			s.Participants[1].Accounts = append(s.Participants[1].Accounts, s.Participants[1].Accounts[0])
 		},

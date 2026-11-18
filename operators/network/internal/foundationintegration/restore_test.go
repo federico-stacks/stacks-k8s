@@ -189,6 +189,10 @@ func snapshotOf(
 						roles[api.SnapshotAccountRoleRegistrySigner],
 						&registry.SignerAccountRefs[i],
 					)
+					// The registry keeps its signers in order; accounts do not.
+					if a, ok := byName[registry.SignerAccountRefs[i].Name]; ok {
+						member.RegistrySigners = append(member.RegistrySigners, a.Identity.Address)
+					}
 				}
 				roles[api.SnapshotAccountRoleAggregateKey] = []*common.NameRef{&registry.AggregateKeyAccountRef}
 				member.RegistryThreshold = ptr.To(registry.Threshold)

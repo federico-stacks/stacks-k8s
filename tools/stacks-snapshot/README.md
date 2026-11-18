@@ -63,9 +63,9 @@ GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.jso
    the tips in the network's `snapshot.stacks.org/capture` annotation, for a resume.
    Actor volumes stay. It then re-reads the actor images and refuses to export if one
    changed during the capture: the manifest would name the wrong writer of the data.
-5. For each actor volume, creates a Pod with the actor's resource bounds that mounts it
-   read-only and streams `tar` out of it over `exec`. Locally, it gzips the stream,
-   computes its sha256 and drops:
+5. For each actor volume, creates a Pod with the actor's resource bounds and tolerations
+   that mounts it read-only and streams `tar` out of it over `exec`. Locally, it gzips
+   the stream, computes its sha256 and drops:
    - the root entry;
    - the peer and mempool files (Stacks `peer.sqlite*` and `mempool.sqlite*`, Bitcoin
      Core `peers.dat`, `anchors.dat` and `mempool.dat`), which hold the source

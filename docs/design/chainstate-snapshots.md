@@ -65,7 +65,7 @@ The snapshot fixes everything its chain data encodes.
 | `spec.chain` (profile, epochs, PoX, allocations, contract bindings) | Equal `genesisDigest`. |
 | Initial cohort | Same participant names and kinds; no member missing, none extra. |
 | Accounts | Same public identities per role (`Identity`, `Signer`, `Holder`, `Administrator`, `Deployer`, `RegistrySigner`, `AggregateKey`). |
-| Links and roles | Same node's Bitcoin node, signer's node, stacker's signer; mining role; stake and lock cycles; contract set registry threshold. |
+| Links and roles | Same node's Bitcoin node, signer's node, stacker's signer; mining role; stake and lock cycles; contract set registry threshold and signer order (the on-chain signer set and its principal depend on it). |
 | Bitcoin node images | Equal to the image that wrote the data. |
 | Stacks node and signer images | Equal under `Exact`; under `AllowDifferent`, recorded per actor in `restored.imageChanges`. Schema migrations only go forward, so use the same or a newer release. |
 | Snapshot height | At least the final initialization ceiling: only `Initialized` networks can be captured. |

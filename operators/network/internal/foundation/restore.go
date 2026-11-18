@@ -3,6 +3,7 @@ package foundation
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -110,6 +111,10 @@ func snapshotParticipant(name string, m restoreMember) api.SnapshotParticipant {
 		if registry := c.StacksContractSet.Initialization; registry != nil {
 			for i := range registry.SignerAccountRefs {
 				add(api.SnapshotAccountRoleRegistrySigner, &registry.SignerAccountRefs[i])
+				// Accounts are sorted; the registry order is kept apart.
+				if identity, ok := identities[registry.SignerAccountRefs[i].Name]; ok {
+					p.RegistrySigners = append(p.RegistrySigners, identity.Address)
+				}
 			}
 			add(api.SnapshotAccountRoleAggregateKey, &registry.AggregateKeyAccountRef)
 			p.RegistryThreshold = ptr.To(registry.Threshold)
@@ -223,6 +228,9 @@ func validateRestore(
 		}
 		if !ptr.Equal(got.RegistryThreshold, want.RegistryThreshold) {
 			problems = append(problems, fmt.Sprintf("%s registry threshold differs", want.Name))
+		}
+		if !slices.Equal(got.RegistrySigners, want.RegistrySigners) {
+			problems = append(problems, fmt.Sprintf("%s registry signer order differs", want.Name))
 		}
 		if want.Archive != nil {
 			archives[want.Name] = *want.Archive

@@ -169,6 +169,10 @@ func projectParticipant(name string, req api.BootstrapRequirement, c api.Configu
 		if registry := c.StacksContractSet.Initialization; registry != nil {
 			for i := range registry.SignerAccountRefs {
 				add(api.SnapshotAccountRoleRegistrySigner, &registry.SignerAccountRefs[i])
+				// Accounts are sorted; the registry order is kept apart.
+				if identity, ok := identities[registry.SignerAccountRefs[i].Name]; ok {
+					p.RegistrySigners = append(p.RegistrySigners, identity.Address)
+				}
 			}
 			add(api.SnapshotAccountRoleAggregateKey, &registry.AggregateKeyAccountRef)
 			threshold := registry.Threshold

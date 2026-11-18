@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -101,13 +103,9 @@ func (c *cluster) export(
 		return "", 0, err
 	}
 	deadline := int64(r.TimeoutSeconds)
-	var resources corev1.ResourceRequirements
-	if f := actorFields(p); f != nil && f.Resources != nil {
-		resources = *f.Resources.DeepCopy()
-	}
 	pod, err := c.core.CoreV1().Pods(c.namespace).Create(
 		ctx,
-		exportPod(r.NetworkUID, p.Spec.ParticipantName, claim, r.ExportImage, deadline, resources),
+		exportPod(r.NetworkUID, p.Spec.ParticipantName, claim, r.ExportImage, deadline, actorFields(p)),
 		metav1.CreateOptions{},
 	)
 	if err != nil {
@@ -249,12 +247,23 @@ func (c *cluster) stream(ctx context.Context, pod string, stdin io.Reader, w io.
 // scheduler places it on the volume's node. It runs as the actor user without privileges and
 // expires on its own if the capture dies. It takes the actor's admitted resource bounds, as the
 // operator's restore init container does, so a namespace whose ResourceQuota requires them admits
-// it like the actor itself.
+// it like the actor itself, and the actor's tolerations: volume affinity pins it to the volume's
+// node but does not bypass that node's taints.
 func exportPod(
 	networkUID, participant, claim, image string,
 	deadline int64,
-	resources corev1.ResourceRequirements,
+	actor *common.ActorFields,
 ) *corev1.Pod {
+	var resources corev1.ResourceRequirements
+	var tolerations []corev1.Toleration
+	if actor != nil {
+		if actor.Resources != nil {
+			resources = *actor.Resources.DeepCopy()
+		}
+		if actor.Placement != nil && actor.Placement.Tolerations != nil {
+			tolerations = slices.Clone(*actor.Placement.Tolerations)
+		}
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "snapshot-export-" + participant + "-",
@@ -266,6 +275,7 @@ func exportPod(
 			EnableServiceLinks:            ptr.To(false),
 			ActiveDeadlineSeconds:         ptr.To(deadline),
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
+			Tolerations:                   tolerations,
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser:      ptr.To[int64](actorUser),
 				RunAsGroup:     ptr.To[int64](actorUser),

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -26,10 +27,28 @@ func TestExportPodReadsTheVolumeWithoutPrivileges(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 	}
-	pod := exportPod(networkUID, "node-01", "data-node-01-0", "busybox:1.36", 1800, bounds)
-	// Namespaces with a ResourceQuota require bounds on every container: the actor's apply.
-	if !reflect.DeepEqual(pod.Spec.Containers[0].Resources, bounds) {
-		t.Fatalf("resources %+v", pod.Spec.Containers[0].Resources)
+	tainted := []corev1.Toleration{{
+		Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "stacks",
+		Effect: corev1.TaintEffectNoSchedule,
+	}}
+	actor := &common.ActorFields{Resources: &bounds, Placement: &common.Placement{Tolerations: &tainted}}
+	pod := exportPod(networkUID, "node-01", "data-node-01-0", "busybox:1.36", 1800, actor)
+	// Namespaces with a ResourceQuota require bounds on every container, and the volume's node may
+	// be tainted: the actor's apply.
+	if !reflect.DeepEqual(pod.Spec.Containers[0].Resources, bounds) ||
+		!reflect.DeepEqual(pod.Spec.Tolerations, tainted) {
+		t.Fatalf("resources %+v, tolerations %+v", pod.Spec.Containers[0].Resources, pod.Spec.Tolerations)
+	}
+	if bare := exportPod(
+		networkUID,
+		"node-01",
+		"data-node-01-0",
+		"busybox:1.36",
+		1800,
+		nil,
+	); bare.Spec.Tolerations != nil ||
+		!reflect.DeepEqual(bare.Spec.Containers[0].Resources, corev1.ResourceRequirements{}) {
+		t.Fatalf("an actor without bounds or tolerations: %+v", bare.Spec)
 	}
 	if pod.GenerateName != "snapshot-export-node-01-" || pod.Labels[exportLabel] != networkUID {
 		t.Fatalf("identity %+v", pod.ObjectMeta)

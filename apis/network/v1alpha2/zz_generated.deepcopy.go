@@ -1096,6 +1096,11 @@ func (in *SnapshotParticipant) DeepCopyInto(out *SnapshotParticipant) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.RegistrySigners != nil {
+		in, out := &in.RegistrySigners, &out.RegistrySigners
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Archive != nil {
 		in, out := &in.Archive, &out.Archive
 		*out = new(SnapshotArchive)

@@ -60,6 +60,7 @@ type StacksChainstateSnapshotSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.signer) == (self.kind == 'StacksStacker')",message="signer is required on, and only on, a StacksStacker"
 // +kubebuilder:validation:XValidation:rule="self.kind == 'StacksStacker' ? (has(self.amountMicroSTX) && has(self.lockCycles)) : (!has(self.amountMicroSTX) && !has(self.lockCycles))",message="stake is required on, and only on, a StacksStacker"
 // +kubebuilder:validation:XValidation:rule="!has(self.registryThreshold) || self.kind == 'StacksContractSet'",message="registryThreshold applies to StacksContractSet only"
+// +kubebuilder:validation:XValidation:rule="!has(self.registrySigners) || self.kind == 'StacksContractSet'",message="registrySigners applies to StacksContractSet only"
 type SnapshotParticipant struct {
 	// Name is the source network-relative instance name.
 	// +kubebuilder:validation:MinLength=1
@@ -95,6 +96,14 @@ type SnapshotParticipant struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	RegistryThreshold *int32 `json:"registryThreshold,omitempty"`
+	// RegistrySigners preserves a contract set's registry signer addresses in registry order: the
+	// on-chain signer set and the principal derived from it depend on the order, which accounts
+	// do not carry.
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:items:MaxLength=64
+	// +kubebuilder:validation:items:Pattern=`^ST[0-9A-HJKMNP-TV-Z]{26,39}$`
+	// +listType=atomic
+	RegistrySigners []string `json:"registrySigners,omitempty"`
 	// Archive locates an actor's captured data.
 	Archive *SnapshotArchive `json:"archive,omitempty"`
 }

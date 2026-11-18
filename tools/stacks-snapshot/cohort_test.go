@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -185,6 +186,21 @@ func TestProjectRecordsTheRegistry(t *testing.T) {
 	if strings.Join(roles, ",") != "AggregateKey,Deployer,RegistrySigner,RegistrySigner" ||
 		!ptr.Equal(got[0].RegistryThreshold, ptr.To[int32](2)) {
 		t.Fatalf("contract set projection %+v", got[0])
+	}
+	// The registry order survives the account sort.
+	if want := []string{identity(2).Address, identity(3).Address}; !reflect.DeepEqual(got[0].RegistrySigners, want) {
+		t.Fatalf("registry signers %v, want %v", got[0].RegistrySigners, want)
+	}
+	sbtc.Status.Admission.Configuration.StacksContractSet.Initialization.SignerAccountRefs = []common.NameRef{
+		*ref("bridge-2"),
+		*ref("bridge-1"),
+	}
+	got, err = project([]member{{requirement: req, participant: sbtc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{identity(3).Address, identity(2).Address}; !reflect.DeepEqual(got[0].RegistrySigners, want) {
+		t.Fatalf("swapped registry signers %v, want %v", got[0].RegistrySigners, want)
 	}
 }
 

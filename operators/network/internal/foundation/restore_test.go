@@ -125,7 +125,8 @@ func TestSnapshotParticipantProjectsRolesAndLinks(t *testing.T) {
 		t.Fatalf("stacker projection: %+v", stacker)
 	}
 	contracts := snapshotParticipant("sbtc", cohort["sbtc"])
-	if len(contracts.Accounts) != 4 || !ptr.Equal(contracts.RegistryThreshold, ptr.To(int32(2))) {
+	if len(contracts.Accounts) != 4 || !ptr.Equal(contracts.RegistryThreshold, ptr.To(int32(2))) ||
+		!reflect.DeepEqual(contracts.RegistrySigners, []string{"ST6F", "ST7G"}) {
 		t.Fatalf("contract set projection: %+v", contracts)
 	}
 	node := snapshotParticipant("node-01", cohort["node-01"])
@@ -238,6 +239,25 @@ func TestValidateRestoreReportsEveryDifference(t *testing.T) {
 				c["sbtc"] = m
 			},
 			"sbtc registry threshold differs",
+		},
+		// The same signers in another order keep the accounts and the genesis digest, but the
+		// registry holds the original ordered signer set and the principal derived from it.
+		"swapped registry signers": {
+			func(c map[string]restoreMember, _ *api.StacksChainstateSnapshot) {
+				m := c["sbtc"]
+				m.configuration.StacksContractSet = m.configuration.StacksContractSet.DeepCopy()
+				refs := m.configuration.StacksContractSet.Initialization.SignerAccountRefs
+				refs[0], refs[1] = refs[1], refs[0]
+				c["sbtc"] = m
+			},
+			"sbtc registry signer order differs",
+		},
+		// A snapshot without the order (captured before it was recorded) is refused, not trusted.
+		"registry order not recorded": {
+			func(_ map[string]restoreMember, s *api.StacksChainstateSnapshot) {
+				s.Spec.Participants[2].RegistrySigners = nil
+			},
+			"sbtc registry signer order differs",
 		},
 		// Restore completes every gate, so a snapshot of a network still bootstrapping is refused.
 		"before the final ceiling": {

@@ -382,7 +382,7 @@ spec:
 | --- | --- |
 | image | Snapshot image: archives under /snapshot on a BusyBox-compatible base (sh, tar with gzip, sha256sum, cut, cat, find, sync). Restore verifies each checksum, so a tag is accepted. |
 | genesisDigest | The source network's genesisDigest; the restoring network must compile to the same value. |
-| participants | The source initial cohort, keyed by name: kind, public accounts by role (Identity, Signer, Holder, Administrator, Deployer, RegistrySigner, AggregateKey), links (bitcoinNode on a node, node on a signer, signer on a stacker), miningEnabled on a node, amountMicroSTX/lockCycles on a stacker, registryThreshold on a contract set. CEL requires each field on, and only on, its kind. |
+| participants | The source initial cohort, keyed by name: kind, public accounts by role (Identity, Signer, Holder, Administrator, Deployer, RegistrySigner, AggregateKey), links (bitcoinNode on a node, node on a signer, signer on a stacker), miningEnabled on a node, amountMicroSTX/lockCycles on a stacker, registryThreshold and registrySigners (signer addresses in registry order) on a contract set. CEL requires each field on, and only on, its kind. |
 | participants[].archive | Required on, and only on, BitcoinNode, StacksNode and StacksSigner: gzip tar path under /snapshot, sha256 and the actor image that wrote the data. |
 | bitcoin, stacks | Captured tips. Bitcoin height must reach the source profile's final initialization ceiling. |
 
