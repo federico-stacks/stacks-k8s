@@ -101,9 +101,13 @@ func (c *cluster) export(
 		return "", 0, err
 	}
 	deadline := int64(r.TimeoutSeconds)
+	var resources corev1.ResourceRequirements
+	if f := actorFields(p); f != nil && f.Resources != nil {
+		resources = *f.Resources.DeepCopy()
+	}
 	pod, err := c.core.CoreV1().Pods(c.namespace).Create(
 		ctx,
-		exportPod(r.NetworkUID, p.Spec.ParticipantName, claim, r.ExportImage, deadline),
+		exportPod(r.NetworkUID, p.Spec.ParticipantName, claim, r.ExportImage, deadline, resources),
 		metav1.CreateOptions{},
 	)
 	if err != nil {
@@ -243,8 +247,14 @@ func (c *cluster) stream(ctx context.Context, pod string, stdin io.Reader, w io.
 
 // exportPod mounts one actor volume read-only in a Pod that only waits to be exec'd. The
 // scheduler places it on the volume's node. It runs as the actor user without privileges and
-// expires on its own if the capture dies.
-func exportPod(networkUID, participant, claim, image string, deadline int64) *corev1.Pod {
+// expires on its own if the capture dies. It takes the actor's admitted resource bounds, as the
+// operator's restore init container does, so a namespace whose ResourceQuota requires them admits
+// it like the actor itself.
+func exportPod(
+	networkUID, participant, claim, image string,
+	deadline int64,
+	resources corev1.ResourceRequirements,
+) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "snapshot-export-" + participant + "-",
@@ -267,6 +277,7 @@ func exportPod(networkUID, participant, claim, image string, deadline int64) *co
 				Image:           image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Command:         []string{"sleep", strconv.FormatInt(deadline, 10)},
+				Resources:       resources,
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: ptr.To(false),
 					ReadOnlyRootFilesystem:   ptr.To(true),

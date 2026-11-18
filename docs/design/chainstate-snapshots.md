@@ -40,7 +40,7 @@ credentials; the operator gains no permissions.
 | Step | Bootstrap from genesis | Restore |
 | --- | --- | --- |
 | Freeze | Compile, freeze | Compile, then validate against the snapshot; any mismatch fails resolution with `SnapshotMismatch` before any workload exists. |
-| Actor volumes | Empty | `restore-data` init container from the snapshot image: verify sha256, extract into empty `/data`, drop peer and mempool databases, sync, write a marker holding the checksum. A matching marker skips the step on restart. |
+| Actor volumes | Empty | `restore-data` init container from the snapshot image: verify sha256, extract into empty `/data`, drop peer and mempool files, sync, then write and sync a marker holding the checksum. A matching marker skips the step on restart. |
 | PrepareBitcoin | Generate to the first gate | Prove the restored chain (snapshot height and tip hash, ready wallets, one mature output per miner), then mine exactly one refresh block and record `preparedAt`. |
 | Gates | Observed one by one under ceilings | Completed at `preparedAt` with `initialization.restoredFrom`; the final ceiling is retained as gate completion leaves it. |
 | Stacking | Initial cohort targets the bootstrap cycle | Restored stackers run as a later cohort: keep or renew from the current cycle. The PoX-5 captured-administrator check still applies to them. |
@@ -101,9 +101,10 @@ nodes can be added to any of them.
   checksums only. Private keys stay in the restoring network's own Secrets.
 - Capture refuses a network whose cohort uses generated keys: a restore must
   reproduce the cohort's public identities, so their keys must be importable.
-- Bitcoin Core wallets in the data are watch-only descriptors. Peer databases
-  (which hold the node's p2p key and source peers) and mempools are dropped at
-  capture and again at restore.
+- Bitcoin Core wallets in the data are watch-only descriptors. Peer files (the
+  Stacks peer database, which holds the node's p2p key and source peers, and Bitcoin
+  Core's `peers.dat` and `anchors.dat`) and mempools (`mempool.sqlite`,
+  `mempool.dat`) are dropped at capture and again at restore.
 - An archive captured from a restored network never carries a valid restore
   marker: a marker holds its own archive's checksum, which no archive can contain.
 - Files are dropped by name. The list was checked against stacks-core 4.0.5 (a key
@@ -146,6 +147,11 @@ On kind, with the minimal cohort (one Bitcoin node, mining node and signer):
 
 - Restore always creates a new network; it never rewinds one in place.
 - Removing, replacing or re-linking an initial participant needs a new snapshot.
+- Capture refuses a source whose signer set may depend on participants outside the
+  initial cohort: signers or stackers added after initialization, or participants
+  removed since, whose locked stake can still count.
+- Actor volumes must be persistent: capture refuses ephemeral storage before it
+  stops anything.
 - Kind with locally loaded images is the only qualified delivery; registries and
   managed clusters are untested.
 - Determinism is not a goal: restored networks share a starting chain, not

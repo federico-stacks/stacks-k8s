@@ -91,6 +91,9 @@ func TestRewriteKeepsChainDataAndDropsPeersMempoolsAndRoot(t *testing.T) {
 		entry{name: "./chainstate/mempool.sqlite", kind: tar.TypeReg, body: "pending"},
 		entry{name: "./chainstate/mempool.sqlite-shm", kind: tar.TypeReg, body: "shm"},
 		entry{name: "./regtest/blocks/blk00000.dat", kind: tar.TypeReg, body: "blocks"},
+		entry{name: "./regtest/peers.dat", kind: tar.TypeReg, body: "bitcoin peers"},
+		entry{name: "./regtest/anchors.dat", kind: tar.TypeReg, body: "bitcoin anchors"},
+		entry{name: "./regtest/mempool.dat", kind: tar.TypeReg, body: "bitcoin pending"},
 		// A network that was itself restored carries the restore marker at its data root.
 		entry{name: "./.chainstate-restore", kind: tar.TypeReg, body: "source archive checksum"},
 		entry{name: "./chainstate/.chainstate-restore", kind: tar.TypeReg, body: "kept: not at the root"},

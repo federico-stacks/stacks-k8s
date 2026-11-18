@@ -169,13 +169,16 @@ type observation struct {
 	tip        string
 }
 
-// bitcoinView reads every Bitcoin execution observation of the network.
+// bitcoinView reads the Bitcoin execution observation of every selected Bitcoin node. The network
+// keeps the records of removed nodes, whose observations no longer advance; they are skipped, as
+// the operator's own pause acknowledgement does once they are drained.
 func (c *cluster) bitcoinView(
 	ctx context.Context,
 	root *api.StacksNetwork,
 ) (api.SnapshotBitcoinTip, []observation, error) {
 	var tip api.SnapshotBitcoinTip
 	var seen []observation
+	active := activeParticipants(root)
 	for _, ref := range root.Status.Bitcoin.ExecutionRefs {
 		var e bitcoin.BitcoinExecution
 		if err := c.get(ctx, executionResource, ref.Name, &e); err != nil {
@@ -183,6 +186,9 @@ func (c *cluster) bitcoinView(
 		}
 		if e.UID != ref.UID {
 			return tip, nil, fatal{fmt.Errorf("bitcoin execution %s identity changed", ref.Name)}
+		}
+		if !active[string(e.Spec.Participant.UID)] {
+			continue
 		}
 		o := e.Status.Observation
 		if o == nil {
@@ -197,7 +203,25 @@ func (c *cluster) bitcoinView(
 			tip = api.SnapshotBitcoinTip{Height: o.Height, BlockHash: o.Tip}
 		}
 	}
+	if len(seen) == 0 {
+		return tip, nil, fatal{errors.New("the network has no selected Bitcoin node")}
+	}
 	return tip, seen, nil
+}
+
+// activeParticipants returns the UIDs of the participants the network still selects.
+func activeParticipants(root *api.StacksNetwork) map[string]bool {
+	selected := map[string]bool{}
+	for _, entry := range root.Spec.Participants {
+		selected[entry.Name] = true
+	}
+	active := map[string]bool{}
+	for _, id := range root.Status.Identities {
+		if selected[id.Name] && !id.Removing {
+			active[string(id.UID)] = true
+		}
+	}
+	return active
 }
 
 // stacksView reads the protocol observation of every Stacks node in the cohort.

@@ -11,18 +11,25 @@ const restoreContainer = "restore-data"
 
 // restoreScript extracts one snapshot archive into /data once. The marker records the archive's
 // checksum and is written only after a complete, synced extraction, so an interrupted attempt is
-// discarded and repeated on the next start. A marker the archive itself carries (one captured from
-// a restored network) never matches: no archive can contain its own checksum. Peer databases and
-// mempools are dropped: they hold the source network's peers and transactions.
+// discarded and repeated on the next start. The marker is renamed into place and synced before
+// the actor starts, so a node failure cannot keep the actor's later writes but lose the marker,
+// which would discard them on the next start. A marker the archive itself carries (one captured
+// from a restored network) never matches: no archive can contain its own checksum. Peer databases,
+// peer anchors and mempools of both Stacks and Bitcoin Core are dropped: they hold the source
+// network's peers and transactions. Archives captured before the capture tool dropped them are
+// cleaned here too.
 const restoreScript = `marker=/data/.chainstate-restore
 [ "$(cat "$marker" 2>/dev/null)" = "$2" ] && exit 0
 archive="/snapshot/$1"
 [ "$(sha256sum <"$archive" | cut -d ' ' -f 1)" = "$2" ] || { echo "archive checksum mismatch" >&2; exit 1; }
 find /data -mindepth 1 -delete
 tar -xzf "$archive" -C /data
-find /data \( -name 'peer.sqlite*' -o -name 'mempool.sqlite*' \) -delete
+find /data \( -name 'peer.sqlite*' -o -name 'mempool.sqlite*' -o -name peers.dat -o -name anchors.dat \
+  -o -name mempool.dat \) -delete
 sync
-echo "$2" >"$marker"`
+echo "$2" >"$marker.tmp"
+mv "$marker.tmp" "$marker"
+sync`
 
 // chainstateRestore selects one actor archive of a chainstate snapshot.
 type chainstateRestore struct {

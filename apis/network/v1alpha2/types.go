@@ -283,7 +283,7 @@ type RestoredChainstate struct {
 	Bitcoin SnapshotBitcoinTip `json:"bitcoin"`
 	// ImageChanges lists the Stacks actors that run a different image than the one that wrote their
 	// restored data, as the restore's stacksImagePolicy allowed.
-	// +kubebuilder:validation:MaxItems=200
+	// +kubebuilder:validation:MaxItems=1000
 	// +listType=map
 	// +listMapKey=participant
 	ImageChanges []RestoredImageChange `json:"imageChanges,omitempty"`

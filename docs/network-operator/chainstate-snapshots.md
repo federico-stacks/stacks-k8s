@@ -49,6 +49,9 @@ They are lab keys; never put them in a snapshot, an image or a repository.
 
 Apply the network (for example [minimal.yaml](../design/public-api/examples/minimal.yaml)
 with the accounts changed as above), request `Running` and wait for `Initialized`.
+Keep actor storage persistent, and keep every signer and stacker in the initial
+manifest: capture refuses ephemeral actor storage, and signers, stackers or removed
+participants outside the initial cohort.
 
 ## 2. Capture
 
@@ -147,7 +150,8 @@ miners need funding and coinbase maturity.
 
 - Restore always creates a new network; it does not rewind or restart one in place.
 - A snapshot fixes the consensus shape; removing, replacing or re-linking an initial
-  participant needs a new capture.
+  participant needs a new capture. Signers and stackers added after initialization
+  cannot be captured: a restored network would miss their signing weight.
 - Node settings that shape stored data (event observers, indexes) apply from the restore
   point only.
 - Qualified on kind with locally loaded images; registries and managed clusters are

@@ -9,6 +9,7 @@ import (
 	common "github.com/cylewitruk-stacks/stacks-k8s/apis/network/common/v1alpha2"
 	stacks "github.com/cylewitruk-stacks/stacks-k8s/apis/network/stacks/v1alpha2"
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
+	"k8s.io/utils/ptr"
 )
 
 // member is one frozen initial cohort requirement with its participant and accounts.
@@ -54,6 +55,11 @@ func project(members []member) ([]api.SnapshotParticipant, error) {
 			if image == "" {
 				problems = append(problems, fmt.Sprintf("%s has no admitted actor image", p.Name))
 			}
+			// Checked before the source is stopped: stopping deletes an emptyDir, and a
+			// stopped network cannot be resumed.
+			if f := actorFields(&m.participant); f != nil && f.Storage != nil && ptr.Deref(f.Storage.Ephemeral, false) {
+				problems = append(problems, fmt.Sprintf("%s uses ephemeral storage, which cannot be exported", p.Name))
+			}
 			p.Archive = &api.SnapshotArchive{Path: p.Name + ".tar.gz", Image: image}
 		}
 		out = append(out, p)
@@ -71,6 +77,50 @@ func project(members []member) ([]api.SnapshotParticipant, error) {
 		return nil, errors.New(strings.Join(problems, "; "))
 	}
 	return out, nil
+}
+
+// lateConsensus refuses a source whose signer set may depend on participants outside the frozen
+// initial cohort. A snapshot restores only that cohort: signers and stackers that joined later are
+// missing from the restored network, and their weight can keep it below the signing threshold. A
+// removed participant outside the cohort is refused too: its kind is no longer known, and stake it
+// locked stays in the signer set until it unlocks.
+func lateConsensus(root *api.StacksNetwork, members []member) error {
+	initial := map[string]bool{}
+	for _, m := range members {
+		initial[m.participant.Spec.ParticipantName] = true
+	}
+	selected := map[string]bool{}
+	var late, removed []string
+	for _, entry := range root.Spec.Participants {
+		selected[entry.Name] = true
+		if !initial[entry.Name] &&
+			(entry.Kind == api.ParticipantStacksSigner || entry.Kind == api.ParticipantStacksStacker) {
+			late = append(late, entry.Name)
+		}
+	}
+	for _, id := range root.Status.Identities {
+		if !initial[id.Name] && (!selected[id.Name] || id.Removing) {
+			removed = append(removed, id.Name)
+		}
+	}
+	var problems []string
+	if len(late) > 0 {
+		sort.Strings(late)
+		problems = append(problems, fmt.Sprintf(
+			"signers or stackers %s joined after initialization and would be missing from a restored network",
+			strings.Join(late, ", ")))
+	}
+	if len(removed) > 0 {
+		sort.Strings(removed)
+		problems = append(problems, fmt.Sprintf(
+			"participants %s were removed after initialization and may still hold locked stake",
+			strings.Join(removed, ", ")))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("the signer set may depend on participants outside the initial cohort: %s; "+
+			"capture a network whose consensus participants are all initial", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // projectParticipant projects one cohort member exactly as the operator's restore validation does
@@ -143,22 +193,26 @@ func projectParticipant(name string, req api.BootstrapRequirement, c api.Configu
 
 // actorImage returns the admitted image that writes an actor's data, or empty.
 func actorImage(p *api.StacksNetworkParticipant) string {
-	if p.Status.Admission == nil {
-		return ""
+	if f := actorFields(p); f != nil && f.Image != nil {
+		return *f.Image
 	}
-	var image *string
+	return ""
+}
+
+// actorFields returns the admitted actor policy of a Bitcoin node, Stacks node or signer.
+func actorFields(p *api.StacksNetworkParticipant) *common.ActorFields {
+	if p.Status.Admission == nil {
+		return nil
+	}
 	switch c := p.Status.Admission.Configuration; {
 	case c.BitcoinNode != nil:
-		image = c.BitcoinNode.Image
+		return &c.BitcoinNode.ActorFields
 	case c.StacksNode != nil:
-		image = c.StacksNode.Image
+		return &c.StacksNode.ActorFields
 	case c.StacksSigner != nil:
-		image = c.StacksSigner.Image
+		return &c.StacksSigner.ActorFields
 	}
-	if image == nil {
-		return ""
-	}
-	return *image
+	return nil
 }
 
 func unique(sorted []string) []string {

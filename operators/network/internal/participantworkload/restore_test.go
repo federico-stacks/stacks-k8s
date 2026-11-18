@@ -173,6 +173,10 @@ func TestRestoreScriptExtractsOnce(t *testing.T) {
 		"node/nakamoto-neon/chainstate/mempool.sqlite": "pending",
 		"node/nakamoto-neon/peer.sqlite":               "peers",
 		"node/nakamoto-neon/peer.sqlite-wal":           "peer log",
+		"regtest/blocks/blk00000.dat":                  "blocks",
+		"regtest/peers.dat":                            "bitcoin peers",
+		"regtest/anchors.dat":                          "bitcoin anchors",
+		"regtest/mempool.dat":                          "bitcoin pending",
 		// An archive captured from a restored network carries that network's marker.
 		".chainstate-restore": "source network archive checksum",
 	} {
@@ -219,7 +223,12 @@ func TestRestoreScriptExtractsOnce(t *testing.T) {
 		filepath.Join(data, "node/nakamoto-neon/peer.sqlite"):               false,
 		filepath.Join(data, "node/nakamoto-neon/peer.sqlite-wal"):           false,
 		filepath.Join(data, "node/nakamoto-neon/chainstate/mempool.sqlite"): false,
-		marker: true,
+		filepath.Join(data, "regtest/blocks/blk00000.dat"):                  true,
+		filepath.Join(data, "regtest/peers.dat"):                            false,
+		filepath.Join(data, "regtest/anchors.dat"):                          false,
+		filepath.Join(data, "regtest/mempool.dat"):                          false,
+		marker:          true,
+		marker + ".tmp": false,
 	} {
 		if _, err := os.Stat(path); (err == nil) != present {
 			t.Fatalf("%s present=%v after restore", path, err == nil)

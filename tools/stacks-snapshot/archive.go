@@ -136,14 +136,23 @@ func memberName(hdr *tar.Header) (string, bool, error) {
 	case tar.TypeDir:
 		return name + "/", true, nil
 	case tar.TypeReg:
-		base := path.Base(name)
-		if name == restoreMarker || base == "peer.sqlite" || strings.HasPrefix(base, "peer.sqlite-") ||
-			strings.HasPrefix(base, "mempool.sqlite") {
+		if name == restoreMarker || sourceLocal(path.Base(name)) {
 			return "", false, nil
 		}
 		return name, true, nil
 	}
 	return "", false, fmt.Errorf("member %q has unsupported type %q", hdr.Name, hdr.Typeflag)
+}
+
+// sourceLocal reports a file that holds the source network's peers or pending transactions: the
+// Stacks peer database and mempool, and Bitcoin Core's peer addresses, anchor peers and mempool.
+// The operator's restore drops the same names.
+func sourceLocal(base string) bool {
+	switch base {
+	case "peer.sqlite", "peers.dat", "anchors.dat", "mempool.dat":
+		return true
+	}
+	return strings.HasPrefix(base, "peer.sqlite-") || strings.HasPrefix(base, "mempool.sqlite")
 }
 
 func escapes(name string) bool {

@@ -224,6 +224,63 @@ func TestProjectRequiresAdmittedActorImages(t *testing.T) {
 	}
 }
 
+func TestProjectRefusesEphemeralActorStorage(t *testing.T) {
+	members := cohortFixture()
+	members[0].participant.Status.Admission.Configuration.StacksNode.Storage = &common.Storage{Ephemeral: ptr.To(true)}
+	_, err := project(members)
+	if err == nil || !strings.Contains(err.Error(), "node-01 uses ephemeral storage") {
+		t.Fatalf("got %v", err)
+	}
+	members[0].participant.Status.Admission.Configuration.StacksNode.Storage.Ephemeral = ptr.To(false)
+	if _, err = project(members); err != nil {
+		t.Fatalf("persistent storage refused: %v", err)
+	}
+}
+
+// selecting returns a network that selects the members, each with its allocated identity.
+func selecting(members []member) *api.StacksNetwork {
+	root := &api.StacksNetwork{ObjectMeta: metav1.ObjectMeta{Name: "network", UID: networkUID}}
+	for _, m := range members {
+		name := m.participant.Spec.ParticipantName
+		root.Spec.Participants = append(root.Spec.Participants, api.Participant{Name: name, Kind: m.requirement.Kind})
+		root.Status.Identities = append(root.Status.Identities,
+			api.InstanceIdentity{Name: name, UID: m.participant.UID})
+	}
+	return root
+}
+
+func TestLateConsensusRefusesConsensusParticipantsOutsideTheCohort(t *testing.T) {
+	members := cohortFixture()
+	if err := lateConsensus(selecting(members), members); err != nil {
+		t.Fatalf("initial cohort refused: %v", err)
+	}
+	join := func(root *api.StacksNetwork, name string, kind api.ParticipantKind) {
+		root.Spec.Participants = append(root.Spec.Participants, api.Participant{Name: name, Kind: kind})
+		root.Status.Identities = append(root.Status.Identities,
+			api.InstanceIdentity{Name: name, UID: types.UID(name + "-uid")})
+	}
+	root := selecting(members)
+	join(root, "node-02", api.ParticipantStacksNode)
+	if err := lateConsensus(root, members); err != nil {
+		t.Fatalf("a late plain node refused: %v", err)
+	}
+	for _, kind := range []api.ParticipantKind{api.ParticipantStacksSigner, api.ParticipantStacksStacker} {
+		root = selecting(members)
+		join(root, "late-01", kind)
+		err := lateConsensus(root, members)
+		if err == nil || !strings.Contains(err.Error(), "signers or stackers late-01 joined after initialization") {
+			t.Fatalf("%s: got %v", kind, err)
+		}
+	}
+	// A removed participant's kind is gone, and its locked stake may still count.
+	root = selecting(members)
+	root.Status.Identities = append(root.Status.Identities, api.InstanceIdentity{Name: "gone-01", UID: "gone-uid"})
+	err := lateConsensus(root, members)
+	if err == nil || !strings.Contains(err.Error(), "participants gone-01 were removed after initialization") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestAccountBindingsSelectsDistinctStacksAccounts(t *testing.T) {
 	req := api.BootstrapRequirement{Accounts: []api.PublicAccount{
 		{Binding: common.Binding{Kind: stacks.KindStacksAccount, Name: "a"}},

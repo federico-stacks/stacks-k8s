@@ -142,16 +142,12 @@ func unstructuredOf(t *testing.T, obj runtime.Object, gvk schema.GroupVersionKin
 func fakeSource(t *testing.T, mutate func(objects []*unstructured.Unstructured)) (*cluster, *api.StacksNetwork) {
 	t.Helper()
 	members := cohortFixture()
-	root := &api.StacksNetwork{
-		ObjectMeta: metav1.ObjectMeta{Name: "network", UID: networkUID},
-		Status: api.StacksNetworkStatus{
-			GenesisRef:    &common.Binding{Name: "genesis", UID: "genesis-uid"},
-			GenesisDigest: "sha256:" + strings.Repeat("e", 64),
-			Bitcoin: &api.BitcoinRuntimeStatus{ExecutionRefs: []common.Binding{
-				{Name: "exec-btc-01", UID: "exec-uid"},
-			}},
-		},
-	}
+	root := selecting(members)
+	root.Status.GenesisRef = &common.Binding{Name: "genesis", UID: "genesis-uid"}
+	root.Status.GenesisDigest = "sha256:" + strings.Repeat("e", 64)
+	root.Status.Bitcoin = &api.BitcoinRuntimeStatus{ExecutionRefs: []common.Binding{
+		{Name: "exec-btc-01", UID: "exec-uid"},
+	}}
 	genesis := &api.StacksGenesis{ObjectMeta: metav1.ObjectMeta{Name: "genesis", UID: "genesis-uid"}}
 	objects := []*unstructured.Unstructured{
 		unstructuredOf(t, root, api.GroupVersion.WithKind(api.KindStacksNetwork)),
@@ -182,6 +178,7 @@ func fakeSource(t *testing.T, mutate func(objects []*unstructured.Unstructured))
 	}
 	execution := &bitcoin.BitcoinExecution{
 		ObjectMeta: metav1.ObjectMeta{Name: "exec-btc-01", UID: "exec-uid"},
+		Spec:       bitcoin.BitcoinExecutionSpec{Participant: common.Binding{Name: "p-btc-01", UID: "btc-01-uid"}},
 		Status: bitcoin.BitcoinExecutionStatus{Observation: &bitcoin.BitcoinObservation{
 			Height: 217, Tip: "btc-tip", ObservedAt: metav1.NewTime(at(0)),
 		}},
@@ -239,6 +236,78 @@ func TestClusterReadsTheFrozenCohortAndObservations(t *testing.T) {
 	if err != nil || stx.Height != 126 || stx.IndexBlockID != "index" || stx.BlockHash != "tip" ||
 		stx.RewardCycle != 10 || len(seen) != 1 {
 		t.Fatalf("stacks %+v %v %v", stx, seen, err)
+	}
+}
+
+// The network keeps the execution record of a removed Bitcoin node; its frozen observation must
+// neither lower the tip nor keep the chain from settling.
+func TestBitcoinViewSkipsRemovedNodes(t *testing.T) {
+	removed := &bitcoin.BitcoinExecution{
+		ObjectMeta: metav1.ObjectMeta{Name: "exec-btc-02", UID: "exec-02-uid"},
+		Spec:       bitcoin.BitcoinExecutionSpec{Participant: common.Binding{Name: "p-btc-02", UID: "btc-02-uid"}},
+		Status: bitcoin.BitcoinExecutionStatus{Observation: &bitcoin.BitcoinObservation{
+			Height: 150, Tip: "old-tip", ObservedAt: metav1.NewTime(at(-600)),
+		}},
+	}
+	c, root := fakeSource(t, nil)
+	_, err := c.dynamic.Resource(executionResource).Namespace("lab").Create(context.Background(),
+		unstructuredOf(t, removed, bitcoin.GroupVersion.WithKind(bitcoin.KindBitcoinExecution)),
+		metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.Status.Bitcoin.ExecutionRefs = append(root.Status.Bitcoin.ExecutionRefs,
+		common.Binding{Name: "exec-btc-02", UID: "exec-02-uid"})
+	root.Status.Identities = append(root.Status.Identities, api.InstanceIdentity{Name: "btc-02", UID: "btc-02-uid"})
+	btc, seen, err := c.bitcoinView(context.Background(), root)
+	if err != nil || btc.Height != 217 || len(seen) != 1 {
+		t.Fatalf("bitcoin %+v %v %v", btc, seen, err)
+	}
+	// Still selected but being removed: skipped as well.
+	root.Spec.Participants = append(root.Spec.Participants, api.Participant{Name: "btc-02"})
+	root.Status.Identities[len(root.Status.Identities)-1].Removing = true
+	if btc, seen, err = c.bitcoinView(context.Background(), root); err != nil || btc.Height != 217 || len(seen) != 1 {
+		t.Fatalf("removing node counted: %+v %v %v", btc, seen, err)
+	}
+	// Once it is selected again under a live identity it counts, and its lower tip wins.
+	root.Status.Identities[len(root.Status.Identities)-1].Removing = false
+	if btc, seen, err = c.bitcoinView(context.Background(), root); err != nil || btc.Height != 150 || len(seen) != 2 {
+		t.Fatalf("selected node skipped: %+v %v %v", btc, seen, err)
+	}
+}
+
+func TestImagesUnchangedRefusesAnImageChangedDuringTheCapture(t *testing.T) {
+	ctx := context.Background()
+	c, root := fakeSource(t, nil)
+	members, err := c.cohort(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	participants, err := project(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.imagesUnchanged(ctx, members, participants); err != nil {
+		t.Fatalf("unchanged images refused: %v", err)
+	}
+	c, root = fakeSource(t, func(objects []*unstructured.Unstructured) {
+		for _, u := range objects {
+			if u.GetName() == "p-node-01" {
+				if err := unstructured.SetNestedField(u.Object, "stacks-node:3.2",
+					"status", "admission", "configuration", "stacksNode", "image"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	})
+	members, err = c.cohort(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The manifest recorded the image read before the stop.
+	err = c.imagesUnchanged(ctx, members, participants)
+	if err == nil || !strings.Contains(err.Error(), "node-01 (stacks-node:3.1, now stacks-node:3.2)") {
+		t.Fatalf("got %v", err)
 	}
 }
 

@@ -615,7 +615,7 @@ spec:
                           - participant
                           - snapshotImage
                           type: object
-                        maxItems: 200
+                        maxItems: 1000
                         type: array
                         x-kubernetes-list-map-keys:
                         - participant

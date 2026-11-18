@@ -9,18 +9,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	api "github.com/cylewitruk-stacks/stacks-k8s/apis/network/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestExportPodReadsTheVolumeWithoutPrivileges(t *testing.T) {
-	pod := exportPod(networkUID, "node-01", "data-node-01-0", "busybox:1.36", 1800)
+	bounds := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+	}
+	pod := exportPod(networkUID, "node-01", "data-node-01-0", "busybox:1.36", 1800, bounds)
+	// Namespaces with a ResourceQuota require bounds on every container: the actor's apply.
+	if !reflect.DeepEqual(pod.Spec.Containers[0].Resources, bounds) {
+		t.Fatalf("resources %+v", pod.Spec.Containers[0].Resources)
+	}
 	if pod.GenerateName != "snapshot-export-node-01-" || pod.Labels[exportLabel] != networkUID {
 		t.Fatalf("identity %+v", pod.ObjectMeta)
 	}

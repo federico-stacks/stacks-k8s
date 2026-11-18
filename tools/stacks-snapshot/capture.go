@@ -90,8 +90,14 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 		return out, err
 	}
 	if !r.Resume {
+		if err = lateConsensus(root, members); err != nil {
+			return out, err
+		}
 		mark("checked", fmt.Sprintf("network %s is Initialized; %d cohort participants", r.Network, len(members)))
 		if err = stopStill(ctx, c, r, root, members, &out, mark); err != nil {
+			return out, err
+		}
+		if err = c.imagesUnchanged(ctx, members, participants); err != nil {
 			return out, err
 		}
 	}
@@ -103,6 +109,42 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 	}
 	mark("exported", fmt.Sprintf("%d archives exported", len(out.Archives)))
 	return out, writeManifest(r, root, participants, &out, mark)
+}
+
+// imagesUnchanged re-reads each actor's admitted image once the network is Stopped. The manifest
+// records the image read before the stop as the writer of the data; an image changed while the
+// capture waited may have migrated the volume, so the capture is refused rather than published
+// with a wrong writer.
+func (c *cluster) imagesUnchanged(ctx context.Context, members []member, participants []api.SnapshotParticipant) error {
+	recorded := map[string]string{}
+	for _, p := range participants {
+		if p.Archive != nil {
+			recorded[p.Name] = p.Archive.Image
+		}
+	}
+	var changed []string
+	for _, m := range members {
+		want, ok := recorded[m.participant.Spec.ParticipantName]
+		if !ok {
+			continue
+		}
+		var now api.StacksNetworkParticipant
+		if err := c.get(ctx, participantResource, m.participant.Name, &now); err != nil {
+			return err
+		}
+		if now.UID != m.participant.UID {
+			return fatal{fmt.Errorf("participant %s identity changed", m.participant.Name)}
+		}
+		if got := actorImage(&now); got != want {
+			changed = append(changed, fmt.Sprintf("%s (%s, now %s)", m.participant.Spec.ParticipantName, want, got))
+		}
+	}
+	if len(changed) > 0 {
+		sort.Strings(changed)
+		return fatal{fmt.Errorf("actor images changed during the capture: %s; the data may have been written "+
+			"by either image, so capture a network whose images stay fixed", strings.Join(changed, ", "))}
+	}
+	return nil
 }
 
 // stopStill optionally waits for a Bitcoin height, pauses the network until its chain is still,

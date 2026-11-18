@@ -49,20 +49,27 @@ GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.jso
 
 1. Requires an `Initialized` network that is not stopped, and reads its frozen initial
    cohort. It refuses accounts with generated keys: a restoring network must import the
-   same keys to reproduce the cohort's public identities.
+   same keys to reproduce the cohort's public identities. It also refuses, before
+   anything stops, ephemeral actor storage (stopping deletes it) and signers, stackers
+   or removed participants outside the initial cohort (the restored signer set could
+   miss their weight).
 2. Optionally waits for `bitcoinHeight`, then sets `spec.operation: Paused` and waits
    for phase `Paused`. Bitcoin production stops; nodes keep running.
-3. Waits until the chain is still: every Bitcoin execution and Stacks node observation
-   is refreshed twice in a row with the same tips, and the nodes of each chain agree.
+3. Waits until the chain is still: the observation of every selected Bitcoin node and
+   Stacks node is refreshed twice in a row with the same tips, and the nodes of each
+   chain agree. Records of removed Bitcoin nodes are skipped.
    It records the Bitcoin and Stacks tips from these status observations.
 4. Sets `spec.operation: Stopped` and waits for phase `Stopped`. The same patch records
    the tips in the network's `snapshot.stacks.org/capture` annotation, for a resume.
-   Actor volumes stay.
-5. For each actor volume, creates a Pod that mounts it read-only and streams `tar` out
-   of it over `exec`. Locally, it gzips the stream, computes its sha256 and drops:
+   Actor volumes stay. It then re-reads the actor images and refuses to export if one
+   changed during the capture: the manifest would name the wrong writer of the data.
+5. For each actor volume, creates a Pod with the actor's resource bounds that mounts it
+   read-only and streams `tar` out of it over `exec`. Locally, it gzips the stream,
+   computes its sha256 and drops:
    - the root entry;
-   - the peer and mempool databases, which hold the source network's peers (and the
-     node's p2p key) and pending transactions;
+   - the peer and mempool files (Stacks `peer.sqlite*` and `mempool.sqlite*`, Bitcoin
+     Core `peers.dat`, `anchors.dat` and `mempool.dat`), which hold the source
+     network's peers (and the node's p2p key) and pending transactions;
    - the restore marker of a network that was itself restored.
 
    It refuses links, devices and members outside the data root, and a stream that ends
