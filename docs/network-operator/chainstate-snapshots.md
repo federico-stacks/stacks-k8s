@@ -22,8 +22,9 @@ k() { kubectl --kubeconfig "$STACKS_KUBECONFIG" --context "$STACKS_CONTEXT" "$@"
 
 ## 1. Run a source network with imported keys
 
-Capture refuses accounts with generated keys: a restoring network must reproduce the
-same public identities, so the keys must be importable. Create one Secret entry per
+Capture refuses accounts with generated keys, including accounts funded only by
+`spec.genesis.allocations`: a restoring network must reproduce the same public
+identities, so the keys must be importable. Create one Secret entry per
 account (a hex secp256k1 private key with the `01` compressed suffix), and point each
 account at it instead of `generate: true`:
 

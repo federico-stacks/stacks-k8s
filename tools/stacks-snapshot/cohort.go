@@ -34,12 +34,7 @@ func project(members []member) ([]api.SnapshotParticipant, error) {
 	var generated, problems []string
 	out := make([]api.SnapshotParticipant, 0, len(members))
 	for _, m := range members {
-		for _, a := range m.accounts {
-			// Omission on an account means generation.
-			if a.Spec.Key == nil || a.Spec.Key.Generate != nil {
-				generated = append(generated, a.Name)
-			}
-		}
+		generated = append(generated, generatedKeys(m.accounts)...)
 		if m.participant.Status.Admission == nil {
 			problems = append(problems, fmt.Sprintf("%s has no admitted configuration",
 				m.participant.Spec.ParticipantName))
@@ -65,18 +60,38 @@ func project(members []member) ([]api.SnapshotParticipant, error) {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	if len(generated) > 0 {
-		sort.Strings(generated)
-		return nil, fmt.Errorf(
-			"accounts %s use generated keys, which a restoring network cannot reproduce; "+
-				"import their keys (key.secretRef) in the source network",
-			strings.Join(unique(generated), ", "),
-		)
+	if err := refuseGenerated(generated); err != nil {
+		return nil, err
 	}
 	if len(problems) > 0 {
 		return nil, errors.New(strings.Join(problems, "; "))
 	}
 	return out, nil
+}
+
+// generatedKeys names the accounts whose keys a restoring network would generate anew.
+func generatedKeys(accounts []stacks.StacksAccount) []string {
+	var out []string
+	for _, a := range accounts {
+		// Omission on an account means generation.
+		if a.Spec.Key == nil || a.Spec.Key.Generate != nil {
+			out = append(out, a.Name)
+		}
+	}
+	return out
+}
+
+// refuseGenerated reports the named accounts, if any, as unreproducible.
+func refuseGenerated(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	return fmt.Errorf(
+		"accounts %s use generated keys, which a restoring network cannot reproduce; "+
+			"import their keys (key.secretRef) in the source network",
+		strings.Join(unique(names), ", "),
+	)
 }
 
 // lateConsensus refuses a source whose signer set may depend on participants outside the frozen

@@ -129,14 +129,23 @@ func checkCapturable(root *api.StacksNetwork) error {
 	return nil
 }
 
-// cohort reads the frozen initial cohort with its participants and accounts.
-func (c *cluster) cohort(ctx context.Context, root *api.StacksNetwork) ([]member, error) {
+// frozenGenesis reads the genesis the network published.
+func (c *cluster) frozenGenesis(ctx context.Context, root *api.StacksNetwork) (*api.StacksGenesis, error) {
 	var genesis api.StacksGenesis
 	if err := c.get(ctx, genesisResource, root.Status.GenesisRef.Name, &genesis); err != nil {
 		return nil, err
 	}
 	if genesis.UID != root.Status.GenesisRef.UID {
 		return nil, errors.New("frozen genesis identity changed")
+	}
+	return &genesis, nil
+}
+
+// cohort reads the frozen initial cohort with its participants and accounts.
+func (c *cluster) cohort(ctx context.Context, root *api.StacksNetwork) ([]member, error) {
+	genesis, err := c.frozenGenesis(ctx, root)
+	if err != nil {
+		return nil, err
 	}
 	members := make([]member, 0, len(genesis.Spec.Bootstrap.Requirements))
 	for _, req := range genesis.Spec.Bootstrap.Requirements {
@@ -160,6 +169,32 @@ func (c *cluster) cohort(ctx context.Context, root *api.StacksNetwork) ([]member
 		members = append(members, m)
 	}
 	return members, nil
+}
+
+// fundedKeysImported requires an imported key on every account the frozen genesis pins as a
+// source of its balances. An account funded only by spec.genesis.allocations belongs to no cohort
+// participant, yet its address is in the genesis digest: regenerated on restore, it would change
+// the digest after the source has been stopped.
+func (c *cluster) fundedKeysImported(ctx context.Context, root *api.StacksNetwork) error {
+	genesis, err := c.frozenGenesis(ctx, root)
+	if err != nil {
+		return err
+	}
+	var funded []stacks.StacksAccount
+	for _, b := range genesis.Spec.Source.Dependencies {
+		if b.Kind != stacks.KindStacksAccount {
+			continue
+		}
+		var a stacks.StacksAccount
+		if err := c.get(ctx, accountResource, b.Name, &a); err != nil {
+			return err
+		}
+		if a.UID != b.UID {
+			return fmt.Errorf("account %s identity changed", b.Name)
+		}
+		funded = append(funded, a)
+	}
+	return refuseGenerated(generatedKeys(funded))
 }
 
 // observation is one status-reported chain view and the time the operator made it.

@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 )
 
@@ -308,6 +309,61 @@ func TestImagesUnchangedRefusesAnImageChangedDuringTheCapture(t *testing.T) {
 	err = c.imagesUnchanged(ctx, members, participants)
 	if err == nil || !strings.Contains(err.Error(), "node-01 (stacks-node:3.1, now stacks-node:3.2)") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// An account funded only by spec.genesis.allocations is bound to no cohort participant, yet its
+// address is in the genesis digest, so its key must be imported too.
+func TestFundedAccountsNeedImportedKeys(t *testing.T) {
+	generate := &common.KeySource{Generate: ptr.To(true)}
+	refused := "accounts treasury use generated keys"
+	for name, tc := range map[string]struct {
+		treasury *stacks.StacksAccount
+		want     string
+	}{
+		"imported":  {treasury: ptr.To(account("treasury", imported))},
+		"generated": {treasury: ptr.To(account("treasury", generate)), want: refused},
+		"omitted":   {treasury: ptr.To(account("treasury", nil)), want: refused},
+		"recreated": {
+			treasury: &stacks.StacksAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "treasury", UID: "recreated"},
+				Spec:       stacks.StacksAccountSpec{Key: imported},
+			},
+			want: "account treasury identity changed",
+		},
+		"deleted": {want: "treasury"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, root := fakeSource(t, func(objects []*unstructured.Unstructured) {
+				for _, u := range objects {
+					if u.GetKind() != api.KindStacksGenesis {
+						continue
+					}
+					// A cohort account, the allocation-only account, and a non-account pin.
+					err := unstructured.SetNestedSlice(u.Object, []any{
+						map[string]any{"kind": "StacksAccount", "name": "miner", "uid": "miner-uid"},
+						map[string]any{"kind": "StacksAccount", "name": "treasury", "uid": "treasury-uid"},
+						map[string]any{"kind": "ChainstateSnapshot", "name": "seed", "uid": "seed-uid"},
+					}, "spec", "source", "dependencies")
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			ctx := context.Background()
+			if tc.treasury != nil {
+				_, err := c.dynamic.Resource(accountResource).Namespace("lab").Create(ctx,
+					unstructuredOf(t, tc.treasury, stacks.GroupVersion.WithKind(stacks.KindStacksAccount)),
+					metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := c.fundedKeysImported(ctx, root)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

@@ -496,10 +496,12 @@ func (r *Reconciler) authorized(
 	); err != nil {
 		return nil, fmt.Errorf("genesis unavailable")
 	}
+	// The full-spec fingerprint also covers the restore inputs the workload reads from the genesis.
 	owner := metav1.GetControllerOf(&genesis)
 	if genesis.UID != root.Status.GenesisRef.UID || genesis.DeletionTimestamp != nil || owner == nil ||
 		owner.UID != root.UID ||
 		genesis.Spec.Source.NetworkUID != root.UID ||
+		digest(genesis.Spec) != root.Status.GenesisRef.Fingerprint ||
 		digest(genesis.Spec.Chain) != root.Status.GenesisDigest {
 		return nil, fmt.Errorf("published genesis identity or digest changed")
 	}

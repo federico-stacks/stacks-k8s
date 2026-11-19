@@ -99,8 +99,9 @@ nodes can be added to any of them.
 
 - The snapshot resource and image carry public identities, chain data and
   checksums only. Private keys stay in the restoring network's own Secrets.
-- Capture refuses a network whose cohort uses generated keys: a restore must
-  reproduce the cohort's public identities, so their keys must be importable.
+- Capture refuses a network whose cohort or genesis-funded accounts use generated
+  keys: a restore must reproduce their public identities, which the genesis digest
+  covers, so their keys must be importable.
 - Bitcoin Core wallets in the data are watch-only descriptors. Peer files (the
   Stacks peer database, which holds the node's p2p key and source peers, and Bitcoin
   Core's `peers.dat` and `anchors.dat`) and mempools (`mempool.sqlite`,

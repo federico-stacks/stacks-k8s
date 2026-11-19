@@ -48,8 +48,9 @@ GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.jso
 ## What capture does
 
 1. Requires an `Initialized` network that is not stopped, and reads its frozen initial
-   cohort. It refuses accounts with generated keys: a restoring network must import the
-   same keys to reproduce the cohort's public identities. It also refuses, before
+   cohort. It refuses accounts with generated keys, including accounts funded only by
+   `spec.genesis.allocations`: a restoring network must import the same keys to reproduce
+   the cohort's public identities and the genesis balances. It also refuses, before
    anything stops, ephemeral actor storage (stopping deletes it) and signers, stackers
    or removed participants outside the initial cohort (the restored signer set could
    miss their weight).

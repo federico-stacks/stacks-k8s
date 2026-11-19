@@ -89,6 +89,9 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 	if err != nil {
 		return out, err
 	}
+	if err = c.fundedKeysImported(ctx, root); err != nil {
+		return out, err
+	}
 	if !r.Resume {
 		if err = lateConsensus(root, members); err != nil {
 			return out, err
