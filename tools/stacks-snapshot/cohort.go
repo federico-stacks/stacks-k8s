@@ -138,6 +138,44 @@ func lateConsensus(root *api.StacksNetwork, members []member) error {
 	return nil
 }
 
+// initialStake refuses a source whose stackers changed their stake after initialization. The
+// snapshot records the stake frozen in the genesis, so a restoring network that declares the
+// source's current stake fails validation, and one that declares the initial stake starts its
+// stacker against a lock it must wait out. The admitted policy is compared, not the on-chain lock.
+func initialStake(members []member) error {
+	var changed []string
+	for _, m := range members {
+		req, admission := m.requirement, m.participant.Status.Admission
+		if req.Kind != api.ParticipantStacksStacker || admission == nil {
+			continue
+		}
+		s := admission.Configuration.StacksStacker
+		if s == nil || !ptr.Equal(s.AmountMicroSTX, req.AmountMicroSTX) || !ptr.Equal(s.LockCycles, req.LockCycles) {
+			changed = append(changed, fmt.Sprintf("%s (initial %s, now %s)",
+				m.participant.Spec.ParticipantName, stake(req.AmountMicroSTX, req.LockCycles), currentStake(s)))
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	sort.Strings(changed)
+	return fmt.Errorf("stackers changed their stake after initialization: %s; a snapshot records the "+
+		"initial stake, so capture a network whose stackers keep it", strings.Join(changed, ", "))
+}
+
+// stake formats a stake policy for a refusal.
+func stake(amount *common.Amount, cycles *int32) string {
+	return fmt.Sprintf("%s micro-STX for %d cycles", ptr.Deref(amount, "unset"), ptr.Deref(cycles, 0))
+}
+
+// currentStake formats an admitted stacker policy, which may be missing.
+func currentStake(s *stacks.StacksStackerSpec) string {
+	if s == nil {
+		return "no stacker policy"
+	}
+	return stake(s.AmountMicroSTX, s.LockCycles)
+}
+
 // projectParticipant projects one cohort member exactly as the operator's restore validation does
 // (operators/network/internal/foundation/restore.go, snapshotParticipant): accounts by the role
 // that selects them, public keys in lower case, sorted by role and address.

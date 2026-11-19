@@ -151,6 +151,11 @@ On kind, with the minimal cohort (one Bitcoin node, mining node and signer):
 - Capture refuses a source whose signer set may depend on participants outside the
   initial cohort: signers or stackers added after initialization, or participants
   removed since, whose locked stake can still count.
+- Capture refuses a source whose stackers changed `amountMicroSTX` or `lockCycles`
+  after initialization: the snapshot records the stake frozen in the genesis, which
+  neither the source's current policy nor its locked stake may match. The check
+  compares the admitted policy, not the on-chain lock, so a stake changed and then
+  reverted passes while the changed amount stays locked.
 - Actor volumes must be persistent: capture refuses ephemeral storage before it
   stops anything.
 - Kind with locally loaded images is the only qualified delivery; registries and

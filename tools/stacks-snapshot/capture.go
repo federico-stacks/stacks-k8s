@@ -96,6 +96,9 @@ func capture(ctx context.Context, c *cluster, r request, progress func(string)) 
 		if err = lateConsensus(root, members); err != nil {
 			return out, err
 		}
+		if err = initialStake(members); err != nil {
+			return out, err
+		}
 		mark("checked", fmt.Sprintf("network %s is Initialized; %d cohort participants", r.Network, len(members)))
 		if err = stopStill(ctx, c, r, root, members, &out, mark); err != nil {
 			return out, err

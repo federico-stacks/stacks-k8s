@@ -153,6 +153,9 @@ miners need funding and coinbase maturity.
 - A snapshot fixes the consensus shape; removing, replacing or re-linking an initial
   participant needs a new capture. Signers and stackers added after initialization
   cannot be captured: a restored network would miss their signing weight.
+- A stacker's `amountMicroSTX` and `lockCycles` must keep their initial values until
+  capture: the snapshot records the initial stake, so capture refuses a changed one.
+  Change stake on the restored network instead, once it is `Initialized`.
 - Node settings that shape stored data (event observers, indexes) apply from the restore
   point only.
 - Qualified on kind with locally loaded images; registries and managed clusters are

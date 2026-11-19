@@ -68,6 +68,8 @@ func cohortFixture() []member {
 			HolderAccountRef:        ref("holder"),
 			AdministratorAccountRef: ref("admin"),
 			SignerRef:               ref("signer-01"),
+			AmountMicroSTX:          ptr.To(common.Amount("1000")),
+			LockCycles:              ptr.To[int32](12),
 		},
 	})
 	traffic := participant("traffic", api.ParticipantStacksTransactionProduction, api.Configuration{
@@ -294,6 +296,39 @@ func TestLateConsensusRefusesConsensusParticipantsOutsideTheCohort(t *testing.T)
 	err := lateConsensus(root, members)
 	if err == nil || !strings.Contains(err.Error(), "participants gone-01 were removed after initialization") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Stake is mutable after initialization, but a snapshot records the stake frozen in the genesis.
+func TestInitialStakeRefusesStakeChangedAfterInitialization(t *testing.T) {
+	if err := initialStake(cohortFixture()); err != nil {
+		t.Fatalf("initial stake refused: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		change func(*stacks.StacksStackerSpec)
+		want   string
+	}{
+		"amount": {
+			change: func(s *stacks.StacksStackerSpec) { s.AmountMicroSTX = ptr.To(common.Amount("2000")) },
+			want:   "stacker-01 (initial 1000 micro-STX for 12 cycles, now 2000 micro-STX for 12 cycles)",
+		},
+		"lock cycles": {
+			change: func(s *stacks.StacksStackerSpec) { s.LockCycles = ptr.To[int32](6) },
+			want:   "stacker-01 (initial 1000 micro-STX for 12 cycles, now 1000 micro-STX for 6 cycles)",
+		},
+		// Renewal timing is not recorded in a snapshot.
+		"renewal threshold": {change: func(s *stacks.StacksStackerSpec) { s.RenewWhenRemainingCycles = ptr.To[int32](3) }},
+	} {
+		members := cohortFixture()
+		for i := range members {
+			if s := members[i].participant.Status.Admission.Configuration.StacksStacker; s != nil {
+				tc.change(s)
+			}
+		}
+		err := initialStake(members)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Fatalf("%s: got %v, want %q", name, err, tc.want)
+		}
 	}
 }
 

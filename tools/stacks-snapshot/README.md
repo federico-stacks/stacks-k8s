@@ -53,7 +53,8 @@ GOWORK=off go -C tools/stacks-snapshot run . capture < capture.json > report.jso
    the cohort's public identities and the genesis balances. It also refuses, before
    anything stops, ephemeral actor storage (stopping deletes it) and signers, stackers
    or removed participants outside the initial cohort (the restored signer set could
-   miss their weight).
+   miss their weight), and stackers whose stake changed after initialization (the
+   snapshot records the initial stake).
 2. Optionally waits for `bitcoinHeight`, then sets `spec.operation: Paused` and waits
    for phase `Paused`. Bitcoin production stops; nodes keep running.
 3. Waits until the chain is still: the observation of every selected Bitcoin node and
