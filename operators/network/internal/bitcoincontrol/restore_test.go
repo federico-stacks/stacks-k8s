@@ -438,9 +438,14 @@ func TestWorkerRefusesRestoreOffersBeyondTheSnapshot(t *testing.T) {
 					t.Fatalf("worker step: %v, want refusal %q", err, tc.refusal)
 				}
 			}
+			// The worker sends the armed RPC from its own goroutine: wait for the valid offer to
+			// complete, and require that a refused one was never armed.
 			want := 0
 			if tc.refusal == "" {
 				want = 1
+				eventually(t, func() bool { return f.readRecord(t).Status.CompletedOffer == offer.Number })
+			} else if armed := f.readRecord(t).Status.Armed; armed != nil {
+				t.Fatalf("refused offer was armed: %+v", armed)
 			}
 			if got := f.generated(); got != want {
 				t.Fatalf("worker generated %d blocks, want %d", got, want)
